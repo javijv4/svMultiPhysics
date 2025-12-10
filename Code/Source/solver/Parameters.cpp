@@ -2334,6 +2334,7 @@ FaceParameters::FaceParameters()
   name = Parameter<std::string>("name", "", required);
 
   set_parameter("End_nodes_face_file_path", "", !required, end_nodes_face_file_path);
+  set_parameter("Mpc_nodes_file_path", "", !required, mpc_nodes_file_path);
   set_parameter("Face_file_path", "", !required, face_file_path);
 
   set_parameter("Quadrature_modifier_TRI3", (2.0/3.0), !required, quadrature_modifier_TRI3);

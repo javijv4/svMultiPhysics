@@ -1452,6 +1452,7 @@ class FaceParameters : public ParameterLists
     static const std::string xml_element_name_;
 
     Parameter<std::string> end_nodes_face_file_path;
+    Parameter<std::string> mpc_nodes_file_path;
     Parameter<std::string> face_file_path;
     Parameter<std::string> name;
 
