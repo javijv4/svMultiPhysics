@@ -599,6 +599,27 @@ class faceType
 
     // TRI3 quadrature modifier
     double qmTRI3 = 2.0/3.0;
+
+  //--------------- MPC (Multipoint Constraint) data ---------------
+  //
+  // For 1D MPC faces: for each 1D node, the corresponding 3D face element
+  // node IDs and interpolation weights (basis functions) on the 3D face
+  // where the 1D node resides.
+  //
+  // Target 3D mesh and face indices (-1 if unset).
+  int mpc_target_mesh = -1;
+  int mpc_target_face = -1;
+
+  // For each 1D MPC node 'a', the 3D face element index containing it (-1 if unset).
+  Vector<int> mpc_target_element;
+
+  // 3D face nodes participating in the MPC for each 1D node.
+  // Dimensions: [eNoN_target_face x nNo_1d]
+  Array<int> mpc_nodes;
+
+  // Corresponding interpolation weights (basis function values).
+  // Dimensions: [eNoN_target_face x nNo_1d]
+  Array<double> mpc_weights;
 };
 
 /// @brief Store options for output types.

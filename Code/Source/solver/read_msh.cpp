@@ -1245,6 +1245,8 @@ void read_msh(Simulation* simulation)
   utils::stackType avNds;
 
   set_projector(simulation, avNds);
+  
+  set_projector_mpc(simulation);
 
   for (int iM = 0; iM < com_mod.nMsh; iM++) {
     auto& mesh = com_mod.msh[iM];
@@ -2232,4 +2234,143 @@ void set_projector(Simulation* simulation, utils::stackType& avNds)
   }
 }
 
-};
+void set_projector_mpc(Simulation* simulation)
+{
+  #define n_debug_set_projector_mpc
+  #ifdef debug_set_projector_mpc
+  DebugMsg dmsg(__func__, simulation->com_mod.cm.idcm());
+  dmsg.banner();
+  #endif
+
+  auto& com_mod = simulation->get_com_mod();
+  int nsd = com_mod.nsd;
+
+  // Iterate over <Add_projection> items to pair a 1D MPC face with its 3D face.
+  for (auto& proj_params : simulation->parameters.projection_parameters) {
+    // Face name of the 1D (MPC) face.
+    auto face1_name = proj_params->name();
+    // The 3D face name it projects from.
+    auto face2_name = proj_params->project_from_face();
+
+    int iM1, iFa1;
+    all_fun::find_face(com_mod.msh, face1_name, iM1, iFa1);
+    auto& face1 = com_mod.msh[iM1].fa[iFa1];
+    auto& mesh1 = com_mod.msh[iM1];
+
+    // We only process MPC on 1D (fiber) meshes.
+    if (!mesh1.lFib) {
+      continue;
+    }
+
+    // Ensure this face was provided via Mpc_nodes_file_path (not only end_nodes).
+    // Find the corresponding face parameter by name under the owning MeshParameters.
+    bool is_mpc_face = false;
+    if (iM1 < simulation->parameters.mesh_parameters.size()) {
+      auto mesh_param = simulation->parameters.mesh_parameters[iM1];
+      for (auto fp : mesh_param->face_parameters) {
+        if (fp->name() == face1_name && fp->mpc_nodes_file_path.defined() && fp->mpc_nodes_file_path() != "") {
+          is_mpc_face = true;
+          break;
+        }
+      }
+    }
+    if (!is_mpc_face) {
+      continue;
+    }
+
+    // Locate the target 3D face.
+    int iM2, iFa2;
+    all_fun::find_face(com_mod.msh, face2_name, iM2, iFa2);
+    auto& face2 = com_mod.msh[iM2].fa[iFa2];
+    auto& mesh2 = com_mod.msh[iM2];
+
+    // Allocate MPC mapping storage on the 1D face.
+    face1.mpc_target_mesh = iM2;
+    face1.mpc_target_face = iFa2;
+    face1.mpc_target_element = Vector<int>(face1.nNo);
+    face1.mpc_target_element = -1;
+    face1.mpc_nodes = Array<int>(face2.eNoN, face1.nNo);
+    face1.mpc_nodes = -1;
+    // Weights will be computed later (e.g., in cep.cpp). Leave zeroed.
+    face1.mpc_weights = Array<double>(face2.eNoN, face1.nNo); // optional; stays 0.0 by default
+
+    match_point_face(com_mod, face1, mesh2, face2);
+
+  }
+}
+
+/// @brief For each point on a 1D source face, find the containing element on a destination 3D face
+/// and store the destination element index and its node IDs for later MPC weighting.
+void match_point_face(const ComMod& com_mod, faceType& src_face, const mshType& dst_mesh, const faceType& dst_face)
+{
+  int nsd = com_mod.nsd;
+  int nsd_face = nsd - 1;
+
+  // Precompute bounds for inverse mapping on the destination face element type.
+  Array<double> xib(2, nsd);
+  Array<double> Nb(2, dst_face.eNoN);
+  nn::get_nn_bnds(nsd_face, dst_face.eType, dst_face.eNoN, xib, Nb);
+
+  for (int a = 0; a < src_face.nNo; a++) {
+    Vector<double> xp(nsd);
+    for (int i = 0; i < nsd; i++) {
+      xp(i) = src_face.x(i, a);
+    }
+
+    bool located = false;
+
+    for (int e = 0; e < dst_face.nEl; e++) {
+      Array<double> xl(nsd, dst_face.eNoN);
+      for (int b = 0; b < dst_face.eNoN; b++) {
+        int faceNodeLocal = dst_face.IEN(b, e);   // index into face node list
+        for (int i = 0; i < nsd; i++) {
+          xl(i, b) = dst_face.x(i, faceNodeLocal);
+        }
+      }
+
+      bool ok = false;
+      Vector<double> xi(nsd);
+
+      // Check where the point is located on the destination face.
+      try {
+        nn::get_xi(nsd_face, dst_face.eType, dst_face.eNoN, xl, xp, xi, ok);
+      } catch (const std::exception&) {
+        // Singular mapping for this element; try next.
+        std::cout << "Singular mapping for this element; try next." << std::endl;
+        continue;
+      }
+
+      // Check if the point is within the bounds of the destination face (use face dimension).
+      bool inside = true;
+      for (int i = 0; i < nsd_face; i++) {
+        if (xi(i) < xib(0,i) || xi(i) > xib(1,i)) {
+          inside = false;
+          break;
+        }
+      }
+      if (!inside) {
+        continue;
+      }
+
+      // Evaluate shape functions at xi and store interpolation weights.
+      Vector<double> N(dst_face.eNoN);
+      Array<double> Nx(nsd_face, dst_face.eNoN);
+      nn::get_gnn(nsd_face, dst_face.eType, dst_face.eNoN, xi, N, Nx);
+
+      // Save the destination element index and the destination face nodes for the MPC.
+      src_face.mpc_target_element[a] = e;
+      for (int b = 0; b < dst_face.eNoN; b++) {
+        src_face.mpc_nodes(b, a) = dst_face.IEN(b, e);
+        src_face.mpc_weights(b, a) = N(b);
+      }
+      located = true;
+      break;
+    }
+
+    if (!located) {
+      throw std::runtime_error("MPC node not found on projection face");
+    }
+  }
+}
+
+}; 

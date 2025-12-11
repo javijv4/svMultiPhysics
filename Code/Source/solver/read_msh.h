@@ -47,6 +47,7 @@ namespace read_msh_ns {
   void match_faces(const ComMod& com_mod, const faceType& face1, const faceType& face2, const double tol, utils::stackType& lPrj);
   void match_nodes(const ComMod& com_mod, const faceType& lFa, const faceType& pFa, 
                    const double ptol, const int nNds, Array<int>& map);
+  void match_point_face(const ComMod& com_mod, faceType& src_face, const mshType& dst_mesh, const faceType& dst_face);
 
   void read_fib_nff(Simulation* simulation, mshType& mesh, const std::string& fName, const std::string& kwrd, const int idx);
   void read_msh(Simulation* simulation);
@@ -54,6 +55,7 @@ namespace read_msh_ns {
   void set_dmn_id_ff(Simulation* simulation, mshType& mesh, const std::string& file_name);
   void set_dmn_id_vtk(Simulation* simulation, mshType& mesh, const std::string& file_name, const std::string& kwrd);
   void set_projector(Simulation* simulation, utils::stackType& avNds);
+  void set_projector_mpc(Simulation* simulation);
   void set_ris_projector(Simulation* simulation);
   void set_uris_meshes(Simulation* simulation);
   
