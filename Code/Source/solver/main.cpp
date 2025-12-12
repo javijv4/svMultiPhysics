@@ -434,6 +434,12 @@ void iterate_solution(Simulation* simulation)
       com_mod.R.write("R_as"+ istr);
       com_mod.Val.write("Val_as"+ istr);
 
+      // MPC
+      if (com_mod.mpcFlag) 
+      { 
+        eq_assem::modify_eq_assem_for_mpc(com_mod); 
+      }
+
       // Treatment of boundary conditions on faces
       // Apply Neumman or Traction boundary conditions
       //

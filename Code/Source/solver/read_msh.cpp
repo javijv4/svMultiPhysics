@@ -1245,8 +1245,6 @@ void read_msh(Simulation* simulation)
   utils::stackType avNds;
 
   set_projector(simulation, avNds);
-  
-  set_projector_mpc(simulation);
 
   for (int iM = 0; iM < com_mod.nMsh; iM++) {
     auto& mesh = com_mod.msh[iM];
@@ -2107,6 +2105,9 @@ void set_dmn_id_vtk(Simulation* simulation, mshType& mesh, const std::string& fi
 ///   com_mod.msh[].gN[]
 /// \endcode
 //
+// Forward declaration for end-nodes projector
+void set_projector_end_nodes(Simulation* simulation, utils::stackType& avNds);
+
 void set_projector(Simulation* simulation, utils::stackType& avNds)
 {
   #define n_debug_set_projector 
@@ -2115,19 +2116,30 @@ void set_projector(Simulation* simulation, utils::stackType& avNds)
   dmsg.banner();
   #endif
 
+  // Projector is now split:
+  // - set_projector_mpc handles 1D→3D MPC mappings when mpc_nodes_file_path is set.
+  // - set_projector_end_nodes handles traditional end-node unification (non-fiber).
+  set_projector_mpc(simulation);
+  set_projector_end_nodes(simulation, avNds);
+}
+
+// New: end-nodes projector (previous behavior) with guard to skip fibers.
+void set_projector_end_nodes(Simulation* simulation, utils::stackType& avNds)
+{
   auto& com_mod = simulation->get_com_mod();
   int nPrj = simulation->parameters.projection_parameters.size();
 
-  if (nPrj > 0) {
-    for (int iM = 0; iM < com_mod.nMsh; iM++) {
-      auto& mesh = com_mod.msh[iM];
-      int gnNo = mesh.gnNo;
-      mesh.gpN = Vector<int>(gnNo);
-    }
+  if (nPrj == 0) {
+    return;
   }
 
-  // Calculate an upper limit for the number required stacks
-  //
+  // Allocate gpN
+  for (int iM = 0; iM < com_mod.nMsh; iM++) {
+    auto& mesh = com_mod.msh[iM];
+    int gnNo = mesh.gnNo;
+    mesh.gpN = Vector<int>(gnNo);
+  }
+
   int nStk = 0;
   for (auto& params : simulation->parameters.projection_parameters) { 
     auto ctmpi = params->name();
@@ -2137,65 +2149,42 @@ void set_projector(Simulation* simulation, utils::stackType& avNds)
   }
   std::vector<utils::stackType> stk(nStk);
   utils::stackType lPrj;
-  #ifdef debug_set_projector
-  dmsg << "nStk: " << nStk;
-  #endif
 
-  // Match the nodal coordinates for each projection face.
-  //
   for (auto& params : simulation->parameters.projection_parameters) { 
     int iM, iFa;
     auto ctmpi = params->name();
     all_fun::find_face(com_mod.msh, ctmpi, iM, iFa);
     auto& face1 = com_mod.msh[iM].fa[iFa];
-    #ifdef debug_set_projector
-    dmsg << "iM: " << iM;
-    dmsg << "iFa: " << iFa;
-    dmsg << "face1.name: " << face1.name;
-    #endif
 
     int jM, jFa;
     auto ctmpj = params->project_from_face();
     all_fun::find_face(com_mod.msh, ctmpj, jM, jFa);
     auto& face2 = com_mod.msh[jM].fa[jFa];
-    #ifdef debug_set_projector
-    dmsg << "jM: " << jM;
-    dmsg << "jFa: " << jFa;
-    dmsg << "face2.name: " << face2.name;
-    #endif
+
+    // Skip 1D/3D mixing: end-nodes only for non-fiber meshes.
+    if (com_mod.msh[iM].lFib || com_mod.msh[jM].lFib) {
+      continue;
+    }
 
     double tol = params->projection_tolerance();
-
-    // Match face nodes?
     match_faces(com_mod, face1, face2, tol, lPrj);
 
     while (true) {
       int ia, ja, i, j, k;
-
-      if (!utils::pull_stack(lPrj,ja)) {
-        break;
-      }
-
-      if (!utils::pull_stack(lPrj,ia)) {
-        break;
-      }
-
+      if (!utils::pull_stack(lPrj,ja)) break;
+      if (!utils::pull_stack(lPrj,ia)) break;
       i = com_mod.msh[iM].gN[ia];
       j = com_mod.msh[jM].gN[ja];
 
       if (i == -1) {
         if (j == -1) {
-          // Since neither of them have value add a new node and both of them to the stack.
           if (!utils::pull_stack(avNds, k)) {
             k = com_mod.gtnNo;
             com_mod.gtnNo = com_mod.gtnNo + 1;
           }
           com_mod.msh[iM].gN[ia] = k;
           com_mod.msh[jM].gN[ja] = k;
-
           push_stack(stk[k], {iM,ia,jM,ja});
-
-        // This is the case one of them has already been assigned. So just using that value for the other one
         } else { 
           com_mod.msh[iM].gN[ia] = j;
           push_stack(stk[j], {iM,ia});
@@ -2204,26 +2193,13 @@ void set_projector(Simulation* simulation, utils::stackType& avNds)
         if (j == -1) {
           com_mod.msh[jM].gN[ja] = i;
           push_stack(stk[i], {jM,ja});
-
-        // Since they are both already have assigned values, I will move the
-        // nodes from stack with bigger ID, j, to the other stack, i.
         } else { 
-          if (i == j) {
-            continue; 
-          }
-          if (i > j) {
-            k = i;
-            i = j;
-            j = k;
-          } 
+          if (i == j) continue; 
+          if (i > j) { k = i; i = j; j = k; } 
           while (true) {
             int kM;
-            if (!utils::pull_stack(stk[j],ja)) {
-              break; 
-            }
-            if (!utils::pull_stack(stk[j],kM)) { 
-              break; 
-            }
+            if (!utils::pull_stack(stk[j],ja)) break; 
+            if (!utils::pull_stack(stk[j],kM)) break; 
             com_mod.msh[kM].gN[ja] = i;
             push_stack(stk[i], {kM,ja});
           } 
@@ -2233,7 +2209,6 @@ void set_projector(Simulation* simulation, utils::stackType& avNds)
     }
   }
 }
-
 void set_projector_mpc(Simulation* simulation)
 {
   #define n_debug_set_projector_mpc
@@ -2296,6 +2271,8 @@ void set_projector_mpc(Simulation* simulation)
 
     match_point_face(com_mod, face1, mesh2, face2);
 
+    com_mod.mpcFlag = true;
+
   }
 }
 
@@ -2305,11 +2282,15 @@ void match_point_face(const ComMod& com_mod, faceType& src_face, const mshType& 
 {
   int nsd = com_mod.nsd;
   int nsd_face = nsd - 1;
+  const int eNoN = dst_face.eNoN;
+  const int nEl = dst_face.nEl;
+  const auto& IENf = dst_face.IEN;
+  const auto& Xf = dst_face.x;
 
   // Precompute bounds for inverse mapping on the destination face element type.
   Array<double> xib(2, nsd);
-  Array<double> Nb(2, dst_face.eNoN);
-  nn::get_nn_bnds(nsd_face, dst_face.eType, dst_face.eNoN, xib, Nb);
+  Array<double> Nb(2, eNoN);
+  nn::get_nn_bnds(nsd_face, dst_face.eType, eNoN, xib, Nb);
 
   for (int a = 0; a < src_face.nNo; a++) {
     Vector<double> xp(nsd);
@@ -2319,21 +2300,25 @@ void match_point_face(const ComMod& com_mod, faceType& src_face, const mshType& 
 
     bool located = false;
 
-    for (int e = 0; e < dst_face.nEl; e++) {
-      Array<double> xl(nsd, dst_face.eNoN);
-      for (int b = 0; b < dst_face.eNoN; b++) {
-        int faceNodeLocal = dst_face.IEN(b, e);   // index into face node list
+    // Reuse work buffers across face elements
+    Array<double> xl(nsd, eNoN);
+    Vector<double> xi(nsd);
+    Vector<double> N(eNoN);
+    Array<double> Nx(nsd_face, eNoN);
+
+    for (int e = 0; e < nEl; e++) {
+      for (int b = 0; b < eNoN; b++) {
+        int faceNodeLocal = IENf(b, e);   // index into face node list
         for (int i = 0; i < nsd; i++) {
-          xl(i, b) = dst_face.x(i, faceNodeLocal);
+          xl(i, b) = Xf(i, faceNodeLocal);
         }
       }
 
       bool ok = false;
-      Vector<double> xi(nsd);
 
       // Check where the point is located on the destination face.
       try {
-        nn::get_xi(nsd_face, dst_face.eType, dst_face.eNoN, xl, xp, xi, ok);
+        nn::get_xi(nsd_face, dst_face.eType, eNoN, xl, xp, xi, ok);
       } catch (const std::exception&) {
         // Singular mapping for this element; try next.
         std::cout << "Singular mapping for this element; try next." << std::endl;
@@ -2353,14 +2338,12 @@ void match_point_face(const ComMod& com_mod, faceType& src_face, const mshType& 
       }
 
       // Evaluate shape functions at xi and store interpolation weights.
-      Vector<double> N(dst_face.eNoN);
-      Array<double> Nx(nsd_face, dst_face.eNoN);
-      nn::get_gnn(nsd_face, dst_face.eType, dst_face.eNoN, xi, N, Nx);
+      nn::get_gnn(nsd_face, dst_face.eType, eNoN, xi, N, Nx);
 
       // Save the destination element index and the destination face nodes for the MPC.
       src_face.mpc_target_element[a] = e;
-      for (int b = 0; b < dst_face.eNoN; b++) {
-        src_face.mpc_nodes(b, a) = dst_face.IEN(b, e);
+      for (int b = 0; b < eNoN; b++) {
+        src_face.mpc_nodes(b, a) = IENf(b, e);
         src_face.mpc_weights(b, a) = N(b);
       }
       located = true;

@@ -25,6 +25,7 @@
 #include <fsils_api.hpp>
 
 #include <math.h>
+#include "lapack_defs.h"
 
 namespace eq_assem {
 
@@ -427,6 +428,187 @@ void global_eq_assem(ComMod& com_mod, CepMod& cep_mod, const mshType& lM, const 
   dmsg << "elapsed_time: " << elapsed_time;
   #endif
 }
+
+/// @brief Function to modify the assembled system to enforce MPC coupling between 1D and 3D CEP.
+void modify_eq_assem_for_mpc(ComMod& com_mod)
+{
+  using std::vector;
+
+  const int dof = com_mod.dof;
+  const int tnNo = com_mod.tnNo;
+  if (dof != 1 || tnNo == 0) {
+    return;
+  }
+
+  double f_norm = 0.0;
+  for (int i = 0; i < tnNo; i++) f_norm = std::max(f_norm, std::abs(com_mod.R(0,i)));
+  if (f_norm < 1e-14) return; // skip MPC correction when RHS is (near) zero
+
+  // Identify 1D (fiber) vs 3D nodes
+  vector<char> is1D(tnNo, 0);
+  for (int iM = 0; iM < com_mod.nMsh; iM++) {
+    const auto& msh = com_mod.msh[iM];
+    if (!msh.lFib) { continue; }
+    for (int a = 0; a < msh.gnNo; a++) {
+      int g = msh.gN[a];
+      if (g >= 0 && g < tnNo) {
+        is1D[g] = 1;
+      }
+    }
+  }
+
+  // Collect MPC constraints from 1D faces that have been matched to 3D faces.
+  struct ConstraintRow {
+    int node1d;                 // Global 1D node id
+    int tgt_mesh;               // Target 3D mesh index
+    int tgt_face;               // Target 3D face index
+    int tgt_elem;               // Target 3D face element index
+    vector<int> nodes3d;        // Global 3D node ids participating
+    vector<double> coeff3d;     // Coefficients (-weights)
+  };
+
+  vector<ConstraintRow> constraints;
+
+  for (int iM = 0; iM < com_mod.nMsh; iM++) {
+    const auto& msh1d = com_mod.msh[iM];
+    if (!msh1d.lFib) { continue; }
+    for (int iFa = 0; iFa < msh1d.nFa; iFa++) {
+      const auto& face1d = msh1d.fa[iFa];
+      if (face1d.mpc_target_mesh < 0 || face1d.mpc_target_face < 0) {
+        continue;
+      }
+      const auto& face3d = com_mod.msh[face1d.mpc_target_mesh].fa[face1d.mpc_target_face];
+      const int eNoNf = face3d.eNoN;
+      for (int a = 0; a < face1d.nNo; a++) {
+        int g1d = face1d.gN[a];
+        int e   = (face1d.mpc_target_element.size() != 0) ? face1d.mpc_target_element[a] : -1;
+        if (g1d < 0 || g1d >= tnNo || e < 0 || e >= face3d.nEl) {
+          continue;
+        }
+        ConstraintRow row;
+        row.node1d = g1d;
+        row.tgt_mesh = face1d.mpc_target_mesh;
+        row.tgt_face = face1d.mpc_target_face;
+        row.tgt_elem = e;
+        row.nodes3d.resize(eNoNf);
+        row.coeff3d.resize(eNoNf);
+        for (int b = 0; b < eNoNf; b++) {
+          // face3d.IEN(b,e) should be a global node id after read phase reindexing.
+          int g3d = face3d.IEN(b, e);
+          double w = 0.0;
+          if (face1d.mpc_weights.size() != 0) {
+            w = face1d.mpc_weights(b, a);
+          }
+          row.nodes3d[b] = g3d;
+          row.coeff3d[b] = -w;
+        }
+        constraints.push_back(std::move(row));
+      }
+    }
+  }
+
+
+
+  // Calculate S = B A^{-1} B^T with matrix-free A^{-1} (one solve per column)
+  const int m = static_cast<int>(constraints.size());
+  if (m == 0) {
+    return;
+  }
+  auto& eq = com_mod.eq[com_mod.cEq];
+  auto apply_Ainv = [&](const Vector<double>& rhs, Vector<double>& sol) {
+    Array<double> R_save = com_mod.R;
+    com_mod.R = 0.0;
+    for (int i = 0; i < tnNo; i++) { com_mod.R(0,i) = rhs[i]; }
+    Vector<int> incL(com_mod.nFacesLS); incL = 0;
+    Vector<double> res(com_mod.nFacesLS); res = 0.0;
+    eq.linear_algebra->solve(com_mod, eq, incL, res);
+    for (int i = 0; i < tnNo; i++) { sol[i] = com_mod.R(0,i); }
+    com_mod.R = R_save;
+  };
+
+  std::vector<double> S(m*m, 0.0); // column-major
+  Vector<double> r(tnNo), y(tnNo);
+  for (int j = 0; j < m; j++) {
+    // r = B^T e_j
+    r = 0.0;
+    const auto& rowj = constraints[j];
+    r[rowj.node1d] += 1.0;
+    for (int k = 0; k < static_cast<int>(rowj.nodes3d.size()); k++) {
+      int g = rowj.nodes3d[k];
+      double c = rowj.coeff3d[k];
+      if (g >= 0 && g < tnNo) { r[g] += c; }
+    }
+    // y = A^{-1} r
+    apply_Ainv(r, y);
+    // Column j: S(:,j) = B * y
+    for (int i = 0; i < m; i++) {
+      const auto& rowi = constraints[i];
+      double v = y[rowi.node1d];
+      for (int k = 0; k < static_cast<int>(rowi.nodes3d.size()); k++) {
+        int g = rowi.nodes3d[k];
+        double c = rowi.coeff3d[k];
+        if (g >= 0 && g < tnNo) { v += c * y[g]; }
+      }
+      S[i + j*m] = v;
+    }
+  }
+
+  // Compute u = B * A^{-1} f, with y = A^{-1} f (single solve)
+  Vector<double> fglob(tnNo), yglob(tnNo);
+  for (int i = 0; i < tnNo; i++) {
+    fglob[i] = com_mod.R(0,i);
+  }
+  apply_Ainv(fglob, yglob);
+  std::vector<double> u(m);
+  for (int i = 0; i < m; i++) {
+    const auto& row = constraints[i];
+    double v = yglob[row.node1d];
+    for (int k = 0; k < static_cast<int>(row.nodes3d.size()); k++) {
+      int g = row.nodes3d[k];
+      double c = row.coeff3d[k];
+      if (g >= 0 && g < tnNo) { v += c * yglob[g]; }
+    }
+    u[i] = v;
+  }
+
+  // double u_norm = 0.0;
+  // for (double ui : u) u_norm = std::max(u_norm, std::abs(ui));
+  // if (u_norm < 1e-14) return; // λ ≈ 0, no correction needed
+  for (int i = 0; i < m; i++) {
+    std::cout << "i: " << i << std::endl;
+    std::cout << "u[i]: " << u[i] << std::endl;
+  }
+  // Solve S lambda = u with LAPACK dgesv
+  std::vector<int> ipiv(m);
+  int N = m, NRHS = 1, LDA = m, LDB = m, INFO = 0;
+  dgesv_(&N, &NRHS, S.data(), &LDA, ipiv.data(), u.data(), &LDB, &INFO);
+  if (INFO != 0) {
+    return; // give up correction if small system failed
+  }
+
+  // Build correction corr = B^T * lambda and update global RHS
+  Vector<double> corr(tnNo);
+  corr = 0.0;
+  for (int i = 0; i < m; i++) {
+    const auto& row = constraints[i];
+    double li = u[i]; // u now holds lambda after dgesv
+    // 1D node contribution (+1 * lambda_i)
+    corr[row.node1d] += li;
+    // 3D nodes contributions (c_b * lambda_i)
+    for (int k = 0; k < static_cast<int>(row.nodes3d.size()); k++) {
+      int g = row.nodes3d[k];
+      double c = row.coeff3d[k];
+      if (g >= 0 && g < tnNo) { corr[g] += c * li; }
+    }
+  }
+  for (int i = 0; i < tnNo; i++) {
+    if (corr[i] != 0.0) {
+      com_mod.R(0,i) -= corr[i];
+    }
+  }
+
+}
+
 
 };
 

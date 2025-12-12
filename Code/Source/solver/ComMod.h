@@ -1609,6 +1609,9 @@ class ComMod {
     /// @brief Whether the URIS surface is active
     bool urisActFlag = false;
 
+    /// @brief Whether MPC mappings are present (set in read_msh)
+    bool mpcFlag = false;
+
     /// @brief Number of URIS surfaces (uninitialized, to be set later)
     int nUris;
 

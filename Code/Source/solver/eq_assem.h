@@ -17,6 +17,15 @@ void fsi_ls_upd(ComMod& com_mod, const bcType& lBc, const faceType& lFa);
 
 void global_eq_assem(ComMod& com_mod, CepMod& cep_mod, const mshType& lM, const Array<double>& Ag, const Array<double>& Yg, const Array<double>& Dg);
 
+/// @brief Modify the assembled system to enforce MPC coupling between 1D and 3D CEP.
+///
+/// This is a placeholder that currently performs no changes. The full implementation
+/// will compute the Lagrange multipliers lambda solving S lambda = u and adjust the RHS.
+void modify_eq_assem_for_mpc(ComMod& com_mod);
+
+/// @brief Detect if MPC mappings exist in the current model.
+bool has_mpc(const ComMod& com_mod);
+
 };
 
 #endif
