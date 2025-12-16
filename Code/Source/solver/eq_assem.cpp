@@ -29,6 +29,26 @@
 
 namespace eq_assem {
 
+// Minimal MPC constraint row for a scalar dof: sum(w_k * u(node3d_k)) - u(node1d) = 0.
+struct MpcConstraintRow
+{
+  int node1d = -1;                 // index into [0..tnNo) for the 1D node
+  std::vector<int> node3d;         // indices into [0..tnNo) for the 3D nodes
+  std::vector<double> weights;     // interpolation weights for each 3D node
+};
+
+bool has_mpc(const ComMod& com_mod)
+{
+  for (const auto& msh : com_mod.msh) {
+    for (const auto& fa : msh.fa) {
+      if (fa.mpc_target_mesh >= 0 && fa.mpc_target_face >= 0 && fa.mpc_target_element.size() > 0) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 void b_assem_neu_bc(ComMod& com_mod, const faceType& lFa, const Vector<double>& hg, const Array<double>& Yg) 
 {
   #define n_debug_b_assem_neu_bc
@@ -432,181 +452,204 @@ void global_eq_assem(ComMod& com_mod, CepMod& cep_mod, const mshType& lM, const 
 /// @brief Function to modify the assembled system to enforce MPC coupling between 1D and 3D CEP.
 void modify_eq_assem_for_mpc(ComMod& com_mod)
 {
-  using std::vector;
+  // Solve the constrained system
+  //   [A  B^T][u] = [rhs]
+  //   [B   0 ][λ]   [ 0 ]
+  // by eliminating λ via the Schur complement S = B A^{-1} B^T:
+  //   λ = S^{-1} (B A^{-1} rhs),
+  // then project rhs: rhs <- rhs - B^T λ, and solve A u = rhs (unconstrained solve).
 
-  const int dof = com_mod.dof;
-  const int tnNo = com_mod.tnNo;
-  if (dof != 1 || tnNo == 0) {
+  if (!com_mod.mpcFlag || !has_mpc(com_mod)) {
     return;
   }
 
-  double f_norm = 0.0;
-  for (int i = 0; i < tnNo; i++) f_norm = std::max(f_norm, std::abs(com_mod.R(0,i)));
-  if (f_norm < 1e-14) return; // skip MPC correction when RHS is (near) zero
-
-  // Identify 1D (fiber) vs 3D nodes
-  vector<char> is1D(tnNo, 0);
-  for (int iM = 0; iM < com_mod.nMsh; iM++) {
-    const auto& msh = com_mod.msh[iM];
-    if (!msh.lFib) { continue; }
-    for (int a = 0; a < msh.gnNo; a++) {
-      int g = msh.gN[a];
-      if (g >= 0 && g < tnNo) {
-        is1D[g] = 1;
-      }
-    }
+  // Only apply MPC for scalar-field equations (CEP, heatS) where the constraint is meaningful.
+  const int cEq = com_mod.cEq;
+  auto& eq = com_mod.eq[cEq];
+  if (!(eq.phys == consts::EquationType::phys_CEP || eq.phys == consts::EquationType::phys_heatS)) {
+    return;
   }
 
-  // Collect MPC constraints from 1D faces that have been matched to 3D faces.
-  struct ConstraintRow {
-    int node1d;                 // Global 1D node id
-    int tgt_mesh;               // Target 3D mesh index
-    int tgt_face;               // Target 3D face index
-    int tgt_elem;               // Target 3D face element index
-    vector<int> nodes3d;        // Global 3D node ids participating
-    vector<double> coeff3d;     // Coefficients (-weights)
-  };
+  const int dof = com_mod.dof;
+  if (dof < 1) {
+    return;
+  }
 
-  vector<ConstraintRow> constraints;
+  // We enforce MPC only on the first dof (scalar unknown). This matches current CEP/heat usage.
+  const int mpc_dof = 0;
 
-  for (int iM = 0; iM < com_mod.nMsh; iM++) {
-    const auto& msh1d = com_mod.msh[iM];
-    if (!msh1d.lFib) { continue; }
-    for (int iFa = 0; iFa < msh1d.nFa; iFa++) {
-      const auto& face1d = msh1d.fa[iFa];
-      if (face1d.mpc_target_mesh < 0 || face1d.mpc_target_face < 0) {
+  // Build constraint rows from 1D faces that have MPC mappings to a 3D face.
+  std::vector<MpcConstraintRow> rows;
+
+  for (int iM1 = 0; iM1 < static_cast<int>(com_mod.msh.size()); iM1++) {
+    const auto& mesh1 = com_mod.msh[iM1];
+    if (!mesh1.lFib) {
+      continue;
+    }
+    for (const auto& face1 : mesh1.fa) {
+      if (face1.mpc_target_mesh < 0 || face1.mpc_target_face < 0) {
         continue;
       }
-      const auto& face3d = com_mod.msh[face1d.mpc_target_mesh].fa[face1d.mpc_target_face];
-      const int eNoNf = face3d.eNoN;
-      for (int a = 0; a < face1d.nNo; a++) {
-        int g1d = face1d.gN[a];
-        int e   = (face1d.mpc_target_element.size() != 0) ? face1d.mpc_target_element[a] : -1;
-        if (g1d < 0 || g1d >= tnNo || e < 0 || e >= face3d.nEl) {
-          continue;
-        }
-        ConstraintRow row;
-        row.node1d = g1d;
-        row.tgt_mesh = face1d.mpc_target_mesh;
-        row.tgt_face = face1d.mpc_target_face;
-        row.tgt_elem = e;
-        row.nodes3d.resize(eNoNf);
-        row.coeff3d.resize(eNoNf);
-        for (int b = 0; b < eNoNf; b++) {
-          // face3d.IEN(b,e) should be a global node id after read phase reindexing.
-          int g3d = face3d.IEN(b, e);
-          double w = 0.0;
-          if (face1d.mpc_weights.size() != 0) {
-            w = face1d.mpc_weights(b, a);
+      const int iM2 = face1.mpc_target_mesh;
+      if (iM2 < 0 || iM2 >= static_cast<int>(com_mod.msh.size())) {
+        continue;
+      }
+      const auto& mesh2 = com_mod.msh[iM2];
+      if (face1.mpc_target_face < 0 || face1.mpc_target_face >= mesh2.fa.size()) {
+        continue;
+      }
+      const auto& face2 = mesh2.fa[face1.mpc_target_face];
+
+      // NOTE:
+      // For MPC faces created via Mpc_nodes_file_path, face1.gN(a) is effectively the *global node ID*
+      // (0-based) for the fiber mesh node (it comes from the file, converted with -1 in read_mpc_nodes()).
+      // For 3D faces, face2.gN(face_node) is also set to the mesh/global node ID.
+      //
+      // Therefore, prefer using face*.gN directly as tnNo indices when they are in-range.
+      // Fall back to the older interpretation (face gN is mesh-local, mapped via mesh.gN) only if needed.
+      for (int a = 0; a < face1.nNo; a++) {
+        const int n1 = face1.gN(a);
+
+        MpcConstraintRow row;
+        row.node1d = n1;
+
+        const int nrows = face1.mpc_nodes.nrows();
+        for (int b = 0; b < nrows; b++) {
+          // face1.mpc_nodes stores indices into the *target face* node list (not directly the target mesh).
+          // Map: face-node-index -> mesh-local-node-index -> equation tnNo index.
+          const int n3_face_node = face1.mpc_nodes(b, a);
+          if (n3_face_node < 0 || n3_face_node >= face2.gN.size()) {
+            continue;
           }
-          row.nodes3d[b] = g3d;
-          row.coeff3d[b] = -w;
+          const int n3 = face2.gN(n3_face_node);
+          row.node3d.push_back(n3);
+          row.weights.push_back(face1.mpc_weights(b, a));
         }
-        constraints.push_back(std::move(row));
+
+        if (row.node1d >= 0 && !row.node3d.empty()) {
+          rows.push_back(row);
+        }
       }
     }
   }
 
-
-
-  // Calculate S = B A^{-1} B^T with matrix-free A^{-1} (one solve per column)
-  const int m = static_cast<int>(constraints.size());
+  const int m = static_cast<int>(rows.size());
   if (m == 0) {
     return;
   }
-  auto& eq = com_mod.eq[com_mod.cEq];
-  auto apply_Ainv = [&](const Vector<double>& rhs, Vector<double>& sol) {
-    Array<double> R_save = com_mod.R;
-    com_mod.R = 0.0;
-    for (int i = 0; i < tnNo; i++) { com_mod.R(0,i) = rhs[i]; }
-    Vector<int> incL(com_mod.nFacesLS); incL = 0;
-    Vector<double> res(com_mod.nFacesLS); res = 0.0;
-    eq.linear_algebra->solve(com_mod, eq, incL, res);
-    for (int i = 0; i < tnNo; i++) { sol[i] = com_mod.R(0,i); }
-    com_mod.R = R_save;
+
+  // Helper to evaluate y = B * x for a given solution vector x stored in com_mod.R.
+  auto eval_Bx_local = [&](Vector<double>& y_out) {
+    y_out.resize(m);
+    y_out = 0.0;
+    for (int i = 0; i < m; i++) {
+      double val = 0.0;
+      const auto& row = rows[i];
+      for (int k = 0; k < static_cast<int>(row.node3d.size()); k++) {
+        const int nid = row.node3d[k];
+        if (nid >= 0 && nid < com_mod.tnNo) {
+          val += row.weights[k] * com_mod.R(mpc_dof, nid);
+        }
+      }
+      if (row.node1d >= 0 && row.node1d < com_mod.tnNo) {
+        val -= com_mod.R(mpc_dof, row.node1d);
+      }
+      y_out(i) = val;
+    }
   };
 
-  std::vector<double> S(m*m, 0.0); // column-major
-  Vector<double> r(tnNo), y(tnNo);
+  // Temporary incL/res used by the linear algebra backend.
+  Vector<int> incL(com_mod.nFacesLS);
+  Vector<double> res(com_mod.nFacesLS);
+  incL = 0;
+  res = 0.0;
+
+  // Save original RHS (as assembled) so we can restore and then overwrite with projected RHS.
+  Array<double> R_orig = com_mod.R;
+  // Some linear algebra backends (notably FSILS) may modify the matrix values in-place
+  // (e.g., scaling) during a solve. Because we call solve multiple times to form the
+  // Schur complement, we must restore the assembled matrix each time.
+  Array<double> Val_orig = com_mod.Val;
+
+  // Compute w = A^{-1} rhs (stored back into com_mod.R).
+  com_mod.R = R_orig;
+  com_mod.Val = Val_orig;
+  eq.linear_algebra->solve(com_mod, eq, incL, res);
+
+  // g = B * w
+  Vector<double> g_local;
+  eval_Bx_local(g_local);
+  CmMod cm_mod;
+  Vector<double> g = com_mod.cm.reduce(cm_mod, g_local, MPI_SUM);
+
+  // Build Schur complement S = B * A^{-1} * B^T by applying A^{-1} to each column of B^T.
+  Array<double> S(m, m);
+  S = 0.0;
+
   for (int j = 0; j < m; j++) {
-    // r = B^T e_j
-    r = 0.0;
-    const auto& rowj = constraints[j];
-    r[rowj.node1d] += 1.0;
-    for (int k = 0; k < static_cast<int>(rowj.nodes3d.size()); k++) {
-      int g = rowj.nodes3d[k];
-      double c = rowj.coeff3d[k];
-      if (g >= 0 && g < tnNo) { r[g] += c; }
-    }
-    // y = A^{-1} r
-    apply_Ainv(r, y);
-    // Column j: S(:,j) = B * y
-    for (int i = 0; i < m; i++) {
-      const auto& rowi = constraints[i];
-      double v = y[rowi.node1d];
-      for (int k = 0; k < static_cast<int>(rowi.nodes3d.size()); k++) {
-        int g = rowi.nodes3d[k];
-        double c = rowi.coeff3d[k];
-        if (g >= 0 && g < tnNo) { v += c * y[g]; }
+    // RHS = B^T e_j: scatter row j into a global RHS vector.
+    com_mod.R = 0.0;
+    com_mod.Val = Val_orig;
+    const auto& rowj = rows[j];
+
+    for (int k = 0; k < static_cast<int>(rowj.node3d.size()); k++) {
+      const int nid = rowj.node3d[k];
+      if (nid >= 0 && nid < com_mod.tnNo) {
+        com_mod.R(mpc_dof, nid) += rowj.weights[k];
       }
-      S[i + j*m] = v;
+    }
+    if (rowj.node1d >= 0 && rowj.node1d < com_mod.tnNo) {
+      com_mod.R(mpc_dof, rowj.node1d) -= 1.0;
+    }
+
+    // x_j = A^{-1} * (B^T e_j)
+    eq.linear_algebra->solve(com_mod, eq, incL, res);
+
+    // y = B * x_j gives column j of S
+    Vector<double> y_local;
+    eval_Bx_local(y_local);
+    Vector<double> y = com_mod.cm.reduce(cm_mod, y_local, MPI_SUM);
+
+    for (int i = 0; i < m; i++) {
+      S(i, j) = y(i);
     }
   }
 
-  // Compute u = B * A^{-1} f, with y = A^{-1} f (single solve)
-  Vector<double> fglob(tnNo), yglob(tnNo);
-  for (int i = 0; i < tnNo; i++) {
-    fglob[i] = com_mod.R(0,i);
-  }
-  apply_Ainv(fglob, yglob);
-  std::vector<double> u(m);
+  // Solve S * lambda = g using LAPACK (dgesv).
+  Vector<int> ipiv(m);
+  int nrhs = 1;
+  int info = 0;
+  Array<double> rhs_lambda(m, 1);
   for (int i = 0; i < m; i++) {
-    const auto& row = constraints[i];
-    double v = yglob[row.node1d];
-    for (int k = 0; k < static_cast<int>(row.nodes3d.size()); k++) {
-      int g = row.nodes3d[k];
-      double c = row.coeff3d[k];
-      if (g >= 0 && g < tnNo) { v += c * yglob[g]; }
-    }
-    u[i] = v;
+    rhs_lambda(i, 0) = g(i);
   }
 
-  // double u_norm = 0.0;
-  // for (double ui : u) u_norm = std::max(u_norm, std::abs(ui));
-  // if (u_norm < 1e-14) return; // λ ≈ 0, no correction needed
-  for (int i = 0; i < m; i++) {
-    std::cout << "i: " << i << std::endl;
-    std::cout << "u[i]: " << u[i] << std::endl;
-  }
-  // Solve S lambda = u with LAPACK dgesv
-  std::vector<int> ipiv(m);
-  int N = m, NRHS = 1, LDA = m, LDB = m, INFO = 0;
-  dgesv_(&N, &NRHS, S.data(), &LDA, ipiv.data(), u.data(), &LDB, &INFO);
-  if (INFO != 0) {
-    return; // give up correction if small system failed
+  dgesv_(&m, &nrhs, S.data(), &m, ipiv.data(), rhs_lambda.data(), &m, &info);
+  if (info != 0) {
+    // Restore original RHS before returning.
+    com_mod.R = R_orig;
+    throw std::runtime_error("[modify_eq_assem_for_mpc] Failed to solve MPC Schur complement system (DGESV).");
   }
 
-  // Build correction corr = B^T * lambda and update global RHS
-  Vector<double> corr(tnNo);
-  corr = 0.0;
-  for (int i = 0; i < m; i++) {
-    const auto& row = constraints[i];
-    double li = u[i]; // u now holds lambda after dgesv
-    // 1D node contribution (+1 * lambda_i)
-    corr[row.node1d] += li;
-    // 3D nodes contributions (c_b * lambda_i)
-    for (int k = 0; k < static_cast<int>(row.nodes3d.size()); k++) {
-      int g = row.nodes3d[k];
-      double c = row.coeff3d[k];
-      if (g >= 0 && g < tnNo) { corr[g] += c * li; }
+  // Project RHS: rhs_eff = rhs - B^T * lambda.
+  com_mod.R = R_orig;
+  com_mod.Val = Val_orig;
+  for (int j = 0; j < m; j++) {
+    const double lam = rhs_lambda(j, 0);
+    const auto& rowj = rows[j];
+    for (int k = 0; k < static_cast<int>(rowj.node3d.size()); k++) {
+      const int nid = rowj.node3d[k];
+      if (nid >= 0 && nid < com_mod.tnNo) {
+        com_mod.R(mpc_dof, nid) -= lam * rowj.weights[k];
+      }
     }
-  }
-  for (int i = 0; i < tnNo; i++) {
-    if (corr[i] != 0.0) {
-      com_mod.R(0,i) -= corr[i];
+    if (rowj.node1d >= 0 && rowj.node1d < com_mod.tnNo) {
+      com_mod.R(mpc_dof, rowj.node1d) += lam;
     }
   }
 
+  // Ensure the assembled matrix is restored for the upcoming "real" solve call.
+  com_mod.Val = Val_orig;
 }
 
 
