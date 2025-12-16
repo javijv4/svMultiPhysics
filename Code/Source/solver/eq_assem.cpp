@@ -500,13 +500,7 @@ void modify_eq_assem_for_mpc(ComMod& com_mod)
       }
       const auto& face2 = mesh2.fa[face1.mpc_target_face];
 
-      // NOTE:
-      // For MPC faces created via Mpc_nodes_file_path, face1.gN(a) is effectively the *global node ID*
-      // (0-based) for the fiber mesh node (it comes from the file, converted with -1 in read_mpc_nodes()).
-      // For 3D faces, face2.gN(face_node) is also set to the mesh/global node ID.
-      //
-      // Therefore, prefer using face*.gN directly as tnNo indices when they are in-range.
-      // Fall back to the older interpretation (face gN is mesh-local, mapped via mesh.gN) only if needed.
+      // Loop over the MPC nodes on the 1D mesh.
       for (int a = 0; a < face1.nNo; a++) {
         const int n1 = face1.gN(a);
 
@@ -515,8 +509,6 @@ void modify_eq_assem_for_mpc(ComMod& com_mod)
 
         const int nrows = face1.mpc_nodes.nrows();
         for (int b = 0; b < nrows; b++) {
-          // face1.mpc_nodes stores indices into the *target face* node list (not directly the target mesh).
-          // Map: face-node-index -> mesh-local-node-index -> equation tnNo index.
           const int n3_face_node = face1.mpc_nodes(b, a);
           if (n3_face_node < 0 || n3_face_node >= face2.gN.size()) {
             continue;
