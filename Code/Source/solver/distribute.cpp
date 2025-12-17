@@ -158,6 +158,8 @@ void distribute(Simulation* simulation)
     dist_uris(com_mod, cm_mod, cm);
   }
 
+  // Need the mpc flag here
+  cm.bcast(cm_mod, &com_mod.mpcFlag);
 
   int risProc = -1;
   int jM = 0;
@@ -276,7 +278,58 @@ void distribute(Simulation* simulation)
           }            
         }            
       }            
-    }            
+    }
+
+    // In serial mode, also need to convert MPC data from per-mesh node IDs
+    // to combined global node IDs using msh.gN.
+    if (com_mod.mpcFlag) {
+      for (int iM = 0; iM < nMsh; iM++) {
+        auto& msh = com_mod.msh[iM];
+        for (int iFa = 0; iFa < msh.nFa; iFa++) {
+          auto& face = msh.fa[iFa];
+          if (face.mpc_target_mesh >= 0 && face.mpc_target_face >= 0 && face.mpc_gnNo > 0) {
+            int iM2 = face.mpc_target_mesh;
+            if (iM2 < 0 || iM2 >= nMsh) {
+              continue;  // Invalid target mesh index
+            }
+            auto& mesh2 = com_mod.msh[iM2];
+            int nrows = face.mpc_nodes.nrows();
+
+            // Verify arrays are properly sized and have valid data pointers
+            if (msh.gN.size() == 0 || msh.gN.data() == nullptr) {
+              continue;  // Skip if 1D mesh gN not allocated
+            }
+            if (mesh2.gN.size() == 0 || mesh2.gN.data() == nullptr) {
+              continue;  // Skip if 3D mesh gN not allocated
+            }
+            if (face.mpc_global_node1d.size() == 0 || face.mpc_global_node1d.data() == nullptr) {
+              continue;  // Skip if mpc_global_node1d not allocated
+            }
+            if (face.mpc_nodes.size() == 0 || face.mpc_nodes.data() == nullptr) {
+              continue;  // Skip if mpc_nodes not allocated
+            }
+
+            for (int a = 0; a < face.mpc_gnNo; a++) {
+              // Convert 1D mesh node ID to combined global node ID
+              int mesh1_node_id = face.mpc_global_node1d(a);
+              if (mesh1_node_id < 0 || mesh1_node_id >= static_cast<int>(msh.gN.size())) {
+                continue;
+              }
+              face.mpc_global_node1d(a) = msh.gN[mesh1_node_id];
+
+              // Convert 3D mesh node IDs to combined global node IDs
+              for (int b = 0; b < nrows; b++) {
+                int mesh2_node_id = face.mpc_nodes(b, a);
+                if (mesh2_node_id >= 0 && mesh2_node_id < static_cast<int>(mesh2.gN.size())) {
+                  face.mpc_nodes(b, a) = mesh2.gN[mesh2_node_id];
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
     return; 
   }            
 
@@ -290,6 +343,94 @@ void distribute(Simulation* simulation)
   #endif
   std::vector<mshType> tMs(nMsh);
 
+  // Save MPC data BEFORE face partitioning because part_face destroys the original face.
+  // We store MPC data per (mesh, face) pair for later broadcasting.
+  struct MpcFaceData {
+    int mpc_target_mesh = -1;
+    int mpc_target_face = -1;
+    int mpc_gnNo = 0;
+    int mpc_nodes_nrows = 0;
+    Vector<int> mpc_global_node1d;
+    Vector<int> mpc_target_element;
+    Array<int> mpc_nodes;
+    Array<double> mpc_weights;
+  };
+  std::vector<std::vector<MpcFaceData>> saved_mpc_data(nMsh);
+
+  if (com_mod.mpcFlag && cm.mas(cm_mod)) {
+    for (int iM = 0; iM < nMsh; iM++) {
+      auto& msh = com_mod.msh[iM];
+      saved_mpc_data[iM].resize(msh.nFa);
+      for (int iFa = 0; iFa < msh.nFa; iFa++) {
+        auto& face = msh.fa[iFa];
+        auto& saved = saved_mpc_data[iM][iFa];
+        
+        // Default to no MPC data - only set valid values after all checks pass
+        saved.mpc_target_mesh = -1;
+        saved.mpc_target_face = -1;
+        saved.mpc_gnNo = 0;
+        
+        // Check if this face has MPC data
+        if (face.mpc_target_mesh < 0 || face.mpc_target_face < 0 || face.mpc_gnNo <= 0) {
+          continue;  // No MPC data on this face
+        }
+        
+        int iM2 = face.mpc_target_mesh;
+        if (iM2 < 0 || iM2 >= nMsh) {
+          continue;  // Invalid target mesh index
+        }
+        auto& mesh2 = com_mod.msh[iM2];
+
+        // Verify arrays are properly sized and have valid data pointers
+        if (msh.gN.size() == 0 || msh.gN.data() == nullptr) {
+          continue;  // Skip if 1D mesh gN not allocated
+        }
+        if (mesh2.gN.size() == 0 || mesh2.gN.data() == nullptr) {
+          continue;  // Skip if 3D mesh gN not allocated
+        }
+        if (face.mpc_global_node1d.size() == 0 || face.mpc_global_node1d.data() == nullptr) {
+          continue;  // Skip if mpc_global_node1d not allocated
+        }
+        if (face.mpc_nodes.size() == 0 || face.mpc_nodes.data() == nullptr) {
+          continue;  // Skip if mpc_nodes not allocated
+        }
+
+        // All checks passed - now copy and convert the data
+        saved.mpc_target_mesh = face.mpc_target_mesh;
+        saved.mpc_target_face = face.mpc_target_face;
+        saved.mpc_gnNo = face.mpc_gnNo;
+        saved.mpc_nodes_nrows = face.mpc_nodes.nrows();
+        saved.mpc_target_element = face.mpc_target_element;
+        saved.mpc_weights = face.mpc_weights;
+
+        // IMPORTANT: Convert per-mesh node IDs to combined global node IDs.
+        // At this point, msh.gN[mesh_node_id] = combined_global_node_id.
+        saved.mpc_global_node1d.resize(face.mpc_gnNo);
+        saved.mpc_nodes.resize(saved.mpc_nodes_nrows, face.mpc_gnNo);
+
+        for (int a = 0; a < face.mpc_gnNo; a++) {
+          // Convert 1D mesh node ID to combined global node ID
+          int mesh1_node_id = face.mpc_global_node1d(a);
+          if (mesh1_node_id >= 0 && mesh1_node_id < static_cast<int>(msh.gN.size())) {
+            saved.mpc_global_node1d(a) = msh.gN[mesh1_node_id];
+          } else {
+            saved.mpc_global_node1d(a) = -1;
+          }
+
+          // Convert 3D mesh node IDs to combined global node IDs
+          for (int b = 0; b < saved.mpc_nodes_nrows; b++) {
+            int mesh2_node_id = face.mpc_nodes(b, a);
+            if (mesh2_node_id >= 0 && mesh2_node_id < static_cast<int>(mesh2.gN.size())) {
+              saved.mpc_nodes(b, a) = mesh2.gN[mesh2_node_id];
+            } else {
+              saved.mpc_nodes(b, a) = -1;
+            }
+          }
+        }
+      }
+    }
+  }
+
   for (int iM = 0; iM < nMsh; iM++) {
     auto& msh = com_mod.msh[iM];
     tMs[iM].fa.resize(msh.nFa);
@@ -297,6 +438,61 @@ void distribute(Simulation* simulation)
     for (int iFa = 0; iFa < msh.nFa; iFa++) {
       auto& face = msh.fa[iFa];
       part_face(simulation, msh, face, tMs[iM].fa[iFa], gmtl);
+    }
+  }
+
+  // Distribute MPC data for faces with MPC mappings.
+  // MPC data uses global node IDs and must be broadcast to all processes.
+  // We use the saved data from master since part_face destroyed the original.
+  if (com_mod.mpcFlag) {
+    for (int iM = 0; iM < nMsh; iM++) {
+      auto& msh = com_mod.msh[iM];
+      if (cm.slv(cm_mod)) {
+        saved_mpc_data[iM].resize(msh.nFa);
+      }
+      for (int iFa = 0; iFa < msh.nFa; iFa++) {
+        auto& face = msh.fa[iFa];
+        auto& saved = saved_mpc_data[iM][iFa];
+
+        // Broadcast MPC metadata
+        cm.bcast(cm_mod, &saved.mpc_target_mesh);
+        cm.bcast(cm_mod, &saved.mpc_target_face);
+        cm.bcast(cm_mod, &saved.mpc_gnNo);
+
+        // Restore metadata to face
+        face.mpc_target_mesh = saved.mpc_target_mesh;
+        face.mpc_target_face = saved.mpc_target_face;
+        face.mpc_gnNo = saved.mpc_gnNo;
+
+        // Only broadcast MPC arrays if this face has MPC data
+        if (saved.mpc_target_mesh >= 0 && saved.mpc_target_face >= 0 && saved.mpc_gnNo > 0) {
+          int mpc_nNo = saved.mpc_gnNo;
+
+          // Broadcast array dimensions
+          cm.bcast(cm_mod, &saved.mpc_nodes_nrows);
+          int mpc_nodes_nrows = saved.mpc_nodes_nrows;
+
+          // Allocate arrays on slave processes
+          if (cm.slv(cm_mod)) {
+            saved.mpc_global_node1d.resize(mpc_nNo);
+            saved.mpc_target_element.resize(mpc_nNo);
+            saved.mpc_nodes.resize(mpc_nodes_nrows, mpc_nNo);
+            saved.mpc_weights.resize(mpc_nodes_nrows, mpc_nNo);
+          }
+
+          // Broadcast MPC arrays
+          cm.bcast(cm_mod, saved.mpc_global_node1d);
+          cm.bcast(cm_mod, saved.mpc_target_element);
+          cm.bcast(cm_mod, saved.mpc_nodes);
+          cm.bcast(cm_mod, saved.mpc_weights);
+
+          // Restore to face
+          face.mpc_global_node1d = saved.mpc_global_node1d;
+          face.mpc_target_element = saved.mpc_target_element;
+          face.mpc_nodes = saved.mpc_nodes;
+          face.mpc_weights = saved.mpc_weights;
+        }
+      }
     }
   }
 

@@ -2268,6 +2268,8 @@ void set_projector_mpc(Simulation* simulation)
     face1.mpc_nodes = -1;
     // Weights will be computed later (e.g., in cep.cpp). Leave zeroed.
     face1.mpc_weights = Array<double>(face2.eNoN, face1.nNo); // optional; stays 0.0 by default
+    // Store global count of MPC nodes for use after distribution.
+    face1.mpc_gnNo = face1.nNo;
 
     match_point_face(com_mod, face1, mesh2, face2);
 
@@ -2277,7 +2279,7 @@ void set_projector_mpc(Simulation* simulation)
 }
 
 /// @brief For each point on a 1D source face, find the containing element on a destination 3D face
-/// and store the destination element index and its node IDs for later MPC weighting.
+/// and store the destination element index and its row IDs for later MPC weighting.
 void match_point_face(const ComMod& com_mod, faceType& src_face, const mshType& dst_mesh, const faceType& dst_face)
 {
   int nsd = com_mod.nsd;
@@ -2287,12 +2289,18 @@ void match_point_face(const ComMod& com_mod, faceType& src_face, const mshType& 
   const auto& IENf = dst_face.IEN;
   const auto& Xf = dst_face.x;
 
+  // Allocate array to store the global mesh node ID of each 1D MPC point.
+  src_face.mpc_global_node1d.resize(src_face.nNo);
+
   // Precompute bounds for inverse mapping on the destination face element type.
   Array<double> xib(2, nsd);
   Array<double> Nb(2, eNoN);
   nn::get_nn_bnds(nsd_face, dst_face.eType, eNoN, xib, Nb);
 
   for (int a = 0; a < src_face.nNo; a++) {
+    // Store the global mesh node ID of this 1D MPC point.
+    src_face.mpc_global_node1d(a) = src_face.gN(a);
+
     Vector<double> xp(nsd);
     for (int i = 0; i < nsd; i++) {
       xp(i) = src_face.x(i, a);

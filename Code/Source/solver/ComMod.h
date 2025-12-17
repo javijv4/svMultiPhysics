@@ -613,13 +613,22 @@ class faceType
   // For each 1D MPC node 'a', the 3D face element index containing it (-1 if unset).
   Vector<int> mpc_target_element;
 
-  // 3D face nodes participating in the MPC for each 1D node.
-  // Dimensions: [eNoN_target_face x nNo_1d]
+  // Global mesh node IDs of the 1D MPC nodes (before distribution).
+  // Dimension: [nNo_mpc] where nNo_mpc is the global count of MPC nodes.
+  Vector<int> mpc_global_node1d;
+
+  // 3D mesh **global node IDs** participating in the MPC for each 1D node.
+  // Dimensions: [eNoN_target_face x nNo_mpc]
+  // Note: stores global mesh node IDs, not face-local indices, so data
+  // remains valid after mesh distribution across processors.
   Array<int> mpc_nodes;
 
   // Corresponding interpolation weights (basis function values).
-  // Dimensions: [eNoN_target_face x nNo_1d]
+  // Dimensions: [eNoN_target_face x nNo_mpc]
   Array<double> mpc_weights;
+
+  // Global count of MPC nodes (for use after distribution when nNo changes).
+  int mpc_gnNo = 0;
 };
 
 /// @brief Store options for output types.

@@ -25,15 +25,17 @@
 #include <fsils_api.hpp>
 
 #include <math.h>
+#include <unordered_map>
 #include "lapack_defs.h"
 
 namespace eq_assem {
 
 // Minimal MPC constraint row for a scalar dof: sum(w_k * u(node3d_k)) - u(node1d) = 0.
+// Node IDs are stored as **global** mesh node IDs for parallel compatibility.
 struct MpcConstraintRow
 {
-  int node1d = -1;                 // index into [0..tnNo) for the 1D node
-  std::vector<int> node3d;         // indices into [0..tnNo) for the 3D nodes
+  int node1d = -1;                 // global mesh node ID for the 1D node
+  std::vector<int> node3d;         // global mesh node IDs for the 3D nodes
   std::vector<double> weights;     // interpolation weights for each 3D node
 };
 
@@ -450,6 +452,7 @@ void global_eq_assem(ComMod& com_mod, CepMod& cep_mod, const mshType& lM, const 
 }
 
 /// @brief Function to modify the assembled system to enforce MPC coupling between 1D and 3D CEP.
+/// This function handles parallel execution by using global node IDs and MPI communication.
 void modify_eq_assem_for_mpc(ComMod& com_mod)
 {
   // Solve the constrained system
@@ -478,7 +481,23 @@ void modify_eq_assem_for_mpc(ComMod& com_mod)
   // We enforce MPC only on the first dof (scalar unknown). This matches current CEP/heat usage.
   const int mpc_dof = 0;
 
+  // Build a global-to-local node map for efficient lookup during constraint evaluation.
+  // This maps global node IDs to local processor node IDs (-1 if not on this processor).
+  std::unordered_map<int, int> gtl_map;
+  for (int local = 0; local < com_mod.tnNo; local++) {
+    gtl_map[com_mod.ltg(local)] = local;
+  }
+
+  // Helper to convert global node ID to local, returns -1 if not on this processor.
+  auto gtl = [&gtl_map](int global_node) -> int {
+    auto it = gtl_map.find(global_node);
+    return (it != gtl_map.end()) ? it->second : -1;
+  };
+
   // Build constraint rows from 1D faces that have MPC mappings to a 3D face.
+  // The MPC data uses **combined global node IDs** (spanning all meshes), which were
+  // converted from per-mesh node IDs during the distribute phase using msh.gN.
+  // These combined global IDs can be converted to combined local IDs using gtl_map.
   std::vector<MpcConstraintRow> rows;
 
   for (int iM1 = 0; iM1 < static_cast<int>(com_mod.msh.size()); iM1++) {
@@ -490,31 +509,29 @@ void modify_eq_assem_for_mpc(ComMod& com_mod)
       if (face1.mpc_target_mesh < 0 || face1.mpc_target_face < 0) {
         continue;
       }
-      const int iM2 = face1.mpc_target_mesh;
-      if (iM2 < 0 || iM2 >= static_cast<int>(com_mod.msh.size())) {
+      if (face1.mpc_gnNo <= 0) {
         continue;
       }
-      const auto& mesh2 = com_mod.msh[iM2];
-      if (face1.mpc_target_face < 0 || face1.mpc_target_face >= mesh2.fa.size()) {
-        continue;
-      }
-      const auto& face2 = mesh2.fa[face1.mpc_target_face];
 
-      // Loop over the MPC nodes on the 1D mesh.
-      for (int a = 0; a < face1.nNo; a++) {
-        const int n1 = face1.gN(a);
+      // Loop over all MPC nodes using the global count (mpc_gnNo).
+      // The MPC data arrays are the same on all processors after distribution.
+      const int nNo_mpc = face1.mpc_gnNo;
+      const int nrows = face1.mpc_nodes.nrows();
+
+      for (int a = 0; a < nNo_mpc; a++) {
+        // Get the combined global node ID of the 1D MPC point.
+        const int n1_global = face1.mpc_global_node1d(a);
 
         MpcConstraintRow row;
-        row.node1d = n1;
+        row.node1d = n1_global;  // Store combined global node ID
 
-        const int nrows = face1.mpc_nodes.nrows();
         for (int b = 0; b < nrows; b++) {
-          const int n3_face_node = face1.mpc_nodes(b, a);
-          if (n3_face_node < 0 || n3_face_node >= face2.gN.size()) {
+          // mpc_nodes contains combined global node IDs
+          const int n3_global = face1.mpc_nodes(b, a);
+          if (n3_global < 0) {
             continue;
           }
-          const int n3 = face2.gN(n3_face_node);
-          row.node3d.push_back(n3);
+          row.node3d.push_back(n3_global);  // Store combined global node ID
           row.weights.push_back(face1.mpc_weights(b, a));
         }
 
@@ -531,21 +548,30 @@ void modify_eq_assem_for_mpc(ComMod& com_mod)
   }
 
   // Helper to evaluate y = B * x for a given solution vector x stored in com_mod.R.
+  // Each processor computes its local contribution (for nodes it owns).
+  // Uses global node IDs and converts to local when accessing com_mod.R.
   auto eval_Bx_local = [&](Vector<double>& y_out) {
     y_out.resize(m);
     y_out = 0.0;
     for (int i = 0; i < m; i++) {
       double val = 0.0;
       const auto& row = rows[i];
+
+      // Sum contributions from 3D nodes
       for (int k = 0; k < static_cast<int>(row.node3d.size()); k++) {
-        const int nid = row.node3d[k];
-        if (nid >= 0 && nid < com_mod.tnNo) {
-          val += row.weights[k] * com_mod.R(mpc_dof, nid);
+        const int n3_global = row.node3d[k];
+        const int n3_local = gtl(n3_global);
+        if (n3_local >= 0) {
+          val += row.weights[k] * com_mod.R(mpc_dof, n3_local);
         }
       }
-      if (row.node1d >= 0 && row.node1d < com_mod.tnNo) {
-        val -= com_mod.R(mpc_dof, row.node1d);
+
+      // Subtract contribution from 1D node
+      const int n1_local = gtl(row.node1d);
+      if (n1_local >= 0) {
+        val -= com_mod.R(mpc_dof, n1_local);
       }
+
       y_out(i) = val;
     }
   };
@@ -568,7 +594,7 @@ void modify_eq_assem_for_mpc(ComMod& com_mod)
   com_mod.Val = Val_orig;
   eq.linear_algebra->solve(com_mod, eq, incL, res);
 
-  // g = B * w
+  // g = B * w (reduce across all processors)
   Vector<double> g_local;
   eval_Bx_local(g_local);
   CmMod cm_mod;
@@ -580,24 +606,27 @@ void modify_eq_assem_for_mpc(ComMod& com_mod)
 
   for (int j = 0; j < m; j++) {
     // RHS = B^T e_j: scatter row j into a global RHS vector.
+    // Each processor only sets values for nodes it owns.
     com_mod.R = 0.0;
     com_mod.Val = Val_orig;
     const auto& rowj = rows[j];
 
     for (int k = 0; k < static_cast<int>(rowj.node3d.size()); k++) {
-      const int nid = rowj.node3d[k];
-      if (nid >= 0 && nid < com_mod.tnNo) {
-        com_mod.R(mpc_dof, nid) += rowj.weights[k];
+      const int n3_global = rowj.node3d[k];
+      const int n3_local = gtl(n3_global);
+      if (n3_local >= 0) {
+        com_mod.R(mpc_dof, n3_local) += rowj.weights[k];
       }
     }
-    if (rowj.node1d >= 0 && rowj.node1d < com_mod.tnNo) {
-      com_mod.R(mpc_dof, rowj.node1d) -= 1.0;
+    const int n1_local = gtl(rowj.node1d);
+    if (n1_local >= 0) {
+      com_mod.R(mpc_dof, n1_local) -= 1.0;
     }
 
     // x_j = A^{-1} * (B^T e_j)
     eq.linear_algebra->solve(com_mod, eq, incL, res);
 
-    // y = B * x_j gives column j of S
+    // y = B * x_j gives column j of S (reduce across all processors)
     Vector<double> y_local;
     eval_Bx_local(y_local);
     Vector<double> y = com_mod.cm.reduce(cm_mod, y_local, MPI_SUM);
@@ -608,6 +637,7 @@ void modify_eq_assem_for_mpc(ComMod& com_mod)
   }
 
   // Solve S * lambda = g using LAPACK (dgesv).
+  // All processors have the same S and g, so they all compute the same lambda.
   Vector<int> ipiv(m);
   int nrhs = 1;
   int info = 0;
@@ -624,19 +654,23 @@ void modify_eq_assem_for_mpc(ComMod& com_mod)
   }
 
   // Project RHS: rhs_eff = rhs - B^T * lambda.
+  // Each processor updates only the nodes it owns.
   com_mod.R = R_orig;
   com_mod.Val = Val_orig;
   for (int j = 0; j < m; j++) {
     const double lam = rhs_lambda(j, 0);
     const auto& rowj = rows[j];
+
     for (int k = 0; k < static_cast<int>(rowj.node3d.size()); k++) {
-      const int nid = rowj.node3d[k];
-      if (nid >= 0 && nid < com_mod.tnNo) {
-        com_mod.R(mpc_dof, nid) -= lam * rowj.weights[k];
+      const int n3_global = rowj.node3d[k];
+      const int n3_local = gtl(n3_global);
+      if (n3_local >= 0) {
+        com_mod.R(mpc_dof, n3_local) -= lam * rowj.weights[k];
       }
     }
-    if (rowj.node1d >= 0 && rowj.node1d < com_mod.tnNo) {
-      com_mod.R(mpc_dof, rowj.node1d) += lam;
+    const int n1_local = gtl(rowj.node1d);
+    if (n1_local >= 0) {
+      com_mod.R(mpc_dof, n1_local) += lam;
     }
   }
 
