@@ -143,7 +143,7 @@ void read_ndnlff(const std::string& file_name, faceType& face)
 
 static void read_mpc_nodes(const int nsd, const mshType& mesh, const std::string& file_name, faceType& face)
 {
-  // 1) Read node IDs and extract nodal coordinates from the 1D (fiber) mesh.
+  // Read node IDs and extract nodal coordinates from the 1D (fiber) mesh.
   //
   std::ifstream mpc_nodes_file;
   mpc_nodes_file.open(file_name);

@@ -495,9 +495,6 @@ void modify_eq_assem_for_mpc(ComMod& com_mod)
   };
 
   // Build constraint rows from 1D faces that have MPC mappings to a 3D face.
-  // The MPC data uses **combined global node IDs** (spanning all meshes), which were
-  // converted from per-mesh node IDs during the distribute phase using msh.gN.
-  // These combined global IDs can be converted to combined local IDs using gtl_map.
   std::vector<MpcConstraintRow> rows;
 
   for (int iM1 = 0; iM1 < static_cast<int>(com_mod.msh.size()); iM1++) {
@@ -505,7 +502,8 @@ void modify_eq_assem_for_mpc(ComMod& com_mod)
     if (!mesh1.lFib) {
       continue;
     }
-    for (const auto& face1 : mesh1.fa) {
+    for (int iFa = 0; iFa < mesh1.nFa; iFa++) {
+      const auto& face1 = mesh1.fa[iFa];
       if (face1.mpc_target_mesh < 0 || face1.mpc_target_face < 0) {
         continue;
       }

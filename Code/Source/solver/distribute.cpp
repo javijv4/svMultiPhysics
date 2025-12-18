@@ -280,56 +280,8 @@ void distribute(Simulation* simulation)
       }            
     }
 
-    // In serial mode, also need to convert MPC data from per-mesh node IDs
-    // to combined global node IDs using msh.gN.
-    if (com_mod.mpcFlag) {
-      for (int iM = 0; iM < nMsh; iM++) {
-        auto& msh = com_mod.msh[iM];
-        for (int iFa = 0; iFa < msh.nFa; iFa++) {
-          auto& face = msh.fa[iFa];
-          if (face.mpc_target_mesh >= 0 && face.mpc_target_face >= 0 && face.mpc_gnNo > 0) {
-            int iM2 = face.mpc_target_mesh;
-            if (iM2 < 0 || iM2 >= nMsh) {
-              continue;  // Invalid target mesh index
-            }
-            auto& mesh2 = com_mod.msh[iM2];
-            int nrows = face.mpc_nodes.nrows();
-
-            // Verify arrays are properly sized and have valid data pointers
-            if (msh.gN.size() == 0 || msh.gN.data() == nullptr) {
-              continue;  // Skip if 1D mesh gN not allocated
-            }
-            if (mesh2.gN.size() == 0 || mesh2.gN.data() == nullptr) {
-              continue;  // Skip if 3D mesh gN not allocated
-            }
-            if (face.mpc_global_node1d.size() == 0 || face.mpc_global_node1d.data() == nullptr) {
-              continue;  // Skip if mpc_global_node1d not allocated
-            }
-            if (face.mpc_nodes.size() == 0 || face.mpc_nodes.data() == nullptr) {
-              continue;  // Skip if mpc_nodes not allocated
-            }
-
-            for (int a = 0; a < face.mpc_gnNo; a++) {
-              // Convert 1D mesh node ID to combined global node ID
-              int mesh1_node_id = face.mpc_global_node1d(a);
-              if (mesh1_node_id < 0 || mesh1_node_id >= static_cast<int>(msh.gN.size())) {
-                continue;
-              }
-              face.mpc_global_node1d(a) = msh.gN[mesh1_node_id];
-
-              // Convert 3D mesh node IDs to combined global node IDs
-              for (int b = 0; b < nrows; b++) {
-                int mesh2_node_id = face.mpc_nodes(b, a);
-                if (mesh2_node_id >= 0 && mesh2_node_id < static_cast<int>(mesh2.gN.size())) {
-                  face.mpc_nodes(b, a) = mesh2.gN[mesh2_node_id];
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-
+    // In serial mode, MPC data already contains combined global node IDs
+    // (precomputed in set_projector_mpc), so no conversion needed.
     return; 
   }            
 
@@ -344,7 +296,6 @@ void distribute(Simulation* simulation)
   std::vector<mshType> tMs(nMsh);
 
   // Save MPC data BEFORE face partitioning because part_face destroys the original face.
-  // We store MPC data per (mesh, face) pair for later broadcasting.
   struct MpcFaceData {
     int mpc_target_mesh = -1;
     int mpc_target_face = -1;
@@ -365,68 +316,30 @@ void distribute(Simulation* simulation)
         auto& face = msh.fa[iFa];
         auto& saved = saved_mpc_data[iM][iFa];
         
-        // Default to no MPC data - only set valid values after all checks pass
+        // Default to no MPC data
         saved.mpc_target_mesh = -1;
         saved.mpc_target_face = -1;
         saved.mpc_gnNo = 0;
         
         // Check if this face has MPC data
         if (face.mpc_target_mesh < 0 || face.mpc_target_face < 0 || face.mpc_gnNo <= 0) {
-          continue;  // No MPC data on this face
+          continue;
         }
         
-        int iM2 = face.mpc_target_mesh;
-        if (iM2 < 0 || iM2 >= nMsh) {
-          continue;  // Invalid target mesh index
-        }
-        auto& mesh2 = com_mod.msh[iM2];
-
-        // Verify arrays are properly sized and have valid data pointers
-        if (msh.gN.size() == 0 || msh.gN.data() == nullptr) {
-          continue;  // Skip if 1D mesh gN not allocated
-        }
-        if (mesh2.gN.size() == 0 || mesh2.gN.data() == nullptr) {
-          continue;  // Skip if 3D mesh gN not allocated
-        }
-        if (face.mpc_global_node1d.size() == 0 || face.mpc_global_node1d.data() == nullptr) {
-          continue;  // Skip if mpc_global_node1d not allocated
-        }
-        if (face.mpc_nodes.size() == 0 || face.mpc_nodes.data() == nullptr) {
-          continue;  // Skip if mpc_nodes not allocated
+        // Verify arrays are allocated
+        if (face.mpc_global_node1d.size() == 0 || face.mpc_nodes.size() == 0) {
+          continue;
         }
 
-        // All checks passed - now copy and convert the data
+        // Copy MPC data directly - IDs are already combined global (from set_projector_mpc)
         saved.mpc_target_mesh = face.mpc_target_mesh;
         saved.mpc_target_face = face.mpc_target_face;
         saved.mpc_gnNo = face.mpc_gnNo;
         saved.mpc_nodes_nrows = face.mpc_nodes.nrows();
+        saved.mpc_global_node1d = face.mpc_global_node1d;
         saved.mpc_target_element = face.mpc_target_element;
+        saved.mpc_nodes = face.mpc_nodes;
         saved.mpc_weights = face.mpc_weights;
-
-        // IMPORTANT: Convert per-mesh node IDs to combined global node IDs.
-        // At this point, msh.gN[mesh_node_id] = combined_global_node_id.
-        saved.mpc_global_node1d.resize(face.mpc_gnNo);
-        saved.mpc_nodes.resize(saved.mpc_nodes_nrows, face.mpc_gnNo);
-
-        for (int a = 0; a < face.mpc_gnNo; a++) {
-          // Convert 1D mesh node ID to combined global node ID
-          int mesh1_node_id = face.mpc_global_node1d(a);
-          if (mesh1_node_id >= 0 && mesh1_node_id < static_cast<int>(msh.gN.size())) {
-            saved.mpc_global_node1d(a) = msh.gN[mesh1_node_id];
-          } else {
-            saved.mpc_global_node1d(a) = -1;
-          }
-
-          // Convert 3D mesh node IDs to combined global node IDs
-          for (int b = 0; b < saved.mpc_nodes_nrows; b++) {
-            int mesh2_node_id = face.mpc_nodes(b, a);
-            if (mesh2_node_id >= 0 && mesh2_node_id < static_cast<int>(mesh2.gN.size())) {
-              saved.mpc_nodes(b, a) = mesh2.gN[mesh2_node_id];
-            } else {
-              saved.mpc_nodes(b, a) = -1;
-            }
-          }
-        }
       }
     }
   }

@@ -606,6 +606,10 @@ class faceType
   // node IDs and interpolation weights (basis functions) on the 3D face
   // where the 1D node resides.
   //
+  // All node IDs are **combined global node IDs** (spanning all meshes),
+  // precomputed in set_projector_mpc. This means the data is ready for use
+  // after distribution without any additional ID conversion.
+  //
   // Target 3D mesh and face indices (-1 if unset).
   int mpc_target_mesh = -1;
   int mpc_target_face = -1;
@@ -613,14 +617,14 @@ class faceType
   // For each 1D MPC node 'a', the 3D face element index containing it (-1 if unset).
   Vector<int> mpc_target_element;
 
-  // Global mesh node IDs of the 1D MPC nodes (before distribution).
+  // Combined global node IDs of the 1D MPC nodes.
   // Dimension: [nNo_mpc] where nNo_mpc is the global count of MPC nodes.
+  // Precomputed in set_projector_mpc using mesh1.gN.
   Vector<int> mpc_global_node1d;
 
-  // 3D mesh **global node IDs** participating in the MPC for each 1D node.
+  // Combined global node IDs of 3D mesh nodes participating in MPC for each 1D node.
   // Dimensions: [eNoN_target_face x nNo_mpc]
-  // Note: stores global mesh node IDs, not face-local indices, so data
-  // remains valid after mesh distribution across processors.
+  // Precomputed in set_projector_mpc using mesh2.gN.
   Array<int> mpc_nodes;
 
   // Corresponding interpolation weights (basis function values).

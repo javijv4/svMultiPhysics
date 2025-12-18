@@ -1264,6 +1264,10 @@ void read_msh(Simulation* simulation)
     }
   }
 
+  // Now that mesh.gN values are populated, set up MPC mappings.
+  // This must be called after gN is set because it needs combined global node IDs.
+  set_projector_mpc(simulation);
+
   #ifdef debug_read_msh 
   dmsg << "Allocate com_mod.x " << " ...";
   dmsg << "com_mod.gtnNo: " << com_mod.gtnNo;
@@ -2116,14 +2120,13 @@ void set_projector(Simulation* simulation, utils::stackType& avNds)
   dmsg.banner();
   #endif
 
-  // Projector is now split:
-  // - set_projector_mpc handles 1D→3D MPC mappings when mpc_nodes_file_path is set.
-  // - set_projector_end_nodes handles traditional end-node unification (non-fiber).
-  set_projector_mpc(simulation);
+  // Note: set_projector_mpc is called AFTER set_projector returns, because it
+  // needs mesh.gN values which are populated after this function.
+  // set_projector_end_nodes handles traditional end-node unification (non-fiber).
   set_projector_end_nodes(simulation, avNds);
 }
 
-// New: end-nodes projector (previous behavior) with guard to skip fibers.
+// End-nodes projector.
 void set_projector_end_nodes(Simulation* simulation, utils::stackType& avNds)
 {
   auto& com_mod = simulation->get_com_mod();
@@ -2209,6 +2212,7 @@ void set_projector_end_nodes(Simulation* simulation, utils::stackType& avNds)
     }
   }
 }
+
 void set_projector_mpc(Simulation* simulation)
 {
   #define n_debug_set_projector_mpc
@@ -2237,10 +2241,10 @@ void set_projector_mpc(Simulation* simulation)
       continue;
     }
 
-    // Ensure this face was provided via Mpc_nodes_file_path (not only end_nodes).
+    // Ensure this face was provided via Mpc_nodes_file_path.
     // Find the corresponding face parameter by name under the owning MeshParameters.
     bool is_mpc_face = false;
-    if (iM1 < simulation->parameters.mesh_parameters.size()) {
+    if (iM1 < static_cast<int>(simulation->parameters.mesh_parameters.size())) {
       auto mesh_param = simulation->parameters.mesh_parameters[iM1];
       for (auto fp : mesh_param->face_parameters) {
         if (fp->name() == face1_name && fp->mpc_nodes_file_path.defined() && fp->mpc_nodes_file_path() != "") {
@@ -2271,7 +2275,8 @@ void set_projector_mpc(Simulation* simulation)
     // Store global count of MPC nodes for use after distribution.
     face1.mpc_gnNo = face1.nNo;
 
-    match_point_face(com_mod, face1, mesh2, face2);
+    // Compute MPC mappings with combined global node IDs.
+    match_point_face(com_mod, mesh1, face1, mesh2, face2);
 
     com_mod.mpcFlag = true;
 
@@ -2280,7 +2285,14 @@ void set_projector_mpc(Simulation* simulation)
 
 /// @brief For each point on a 1D source face, find the containing element on a destination 3D face
 /// and store the destination element index and its row IDs for later MPC weighting.
-void match_point_face(const ComMod& com_mod, faceType& src_face, const mshType& dst_mesh, const faceType& dst_face)
+///
+/// @param com_mod  Common module with mesh data
+/// @param src_mesh The 1D source mesh (fiber mesh)
+/// @param src_face The 1D source face containing MPC nodes
+/// @param dst_mesh The 3D destination mesh
+/// @param dst_face The 3D destination face to project onto
+void match_point_face(const ComMod& com_mod, const mshType& src_mesh, faceType& src_face, 
+                      const mshType& dst_mesh, const faceType& dst_face)
 {
   int nsd = com_mod.nsd;
   int nsd_face = nsd - 1;
@@ -2289,7 +2301,7 @@ void match_point_face(const ComMod& com_mod, faceType& src_face, const mshType& 
   const auto& IENf = dst_face.IEN;
   const auto& Xf = dst_face.x;
 
-  // Allocate array to store the global mesh node ID of each 1D MPC point.
+  // Allocate array to store the **combined global** node ID of each 1D MPC point.
   src_face.mpc_global_node1d.resize(src_face.nNo);
 
   // Precompute bounds for inverse mapping on the destination face element type.
@@ -2298,8 +2310,11 @@ void match_point_face(const ComMod& com_mod, faceType& src_face, const mshType& 
   nn::get_nn_bnds(nsd_face, dst_face.eType, eNoN, xib, Nb);
 
   for (int a = 0; a < src_face.nNo; a++) {
-    // Store the global mesh node ID of this 1D MPC point.
-    src_face.mpc_global_node1d(a) = src_face.gN(a);
+    // Get the per-mesh node ID from the face, then convert to combined global node ID.
+    // src_face.gN(a) is the per-mesh node index in the 1D mesh.
+    // src_mesh.gN[mesh_node] gives the combined global node ID.
+    int mesh_node_1d = src_face.gN(a);
+    src_face.mpc_global_node1d(a) = src_mesh.gN[mesh_node_1d];
 
     Vector<double> xp(nsd);
     for (int i = 0; i < nsd; i++) {
@@ -2349,9 +2364,14 @@ void match_point_face(const ComMod& com_mod, faceType& src_face, const mshType& 
       nn::get_gnn(nsd_face, dst_face.eType, eNoN, xi, N, Nx);
 
       // Save the destination element index and the destination face nodes for the MPC.
+      // IENf(b,e) is face-local index when VTP has GlobalNodeID, mesh node ID otherwise.
+      // dst_face.gN converts face-local index to per-mesh node ID.
+      // dst_mesh.gN converts per-mesh node ID to combined global node ID.
       src_face.mpc_target_element[a] = e;
       for (int b = 0; b < eNoN; b++) {
-        src_face.mpc_nodes(b, a) = IENf(b, e);
+        int face_local = IENf(b, e);
+        int mesh_node_3d = dst_face.gN(face_local);
+        src_face.mpc_nodes(b, a) = dst_mesh.gN[mesh_node_3d];
         src_face.mpc_weights(b, a) = N(b);
       }
       located = true;
