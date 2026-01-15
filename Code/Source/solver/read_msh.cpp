@@ -1264,10 +1264,6 @@ void read_msh(Simulation* simulation)
     }
   }
 
-  // Now that mesh.gN values are populated, set up MPC mappings.
-  // This must be called after gN is set because it needs combined global node IDs.
-  set_projector_mpc(simulation);
-
   #ifdef debug_read_msh 
   dmsg << "Allocate com_mod.x " << " ...";
   dmsg << "com_mod.gtnNo: " << com_mod.gtnNo;
@@ -1415,6 +1411,10 @@ void read_msh(Simulation* simulation)
       } 
     }  
   }  
+
+  // Now that com_mod.x is properly indexed by global node ID and face IEN
+  // arrays contain global node IDs, set up MPC mappings.
+  set_projector_mpc(simulation);
 
   if (com_mod.resetSim) {
     auto& rmsh = com_mod.rmsh;
@@ -2299,7 +2299,10 @@ void match_point_face(const ComMod& com_mod, const mshType& src_mesh, faceType& 
   const int eNoN = dst_face.eNoN;
   const int nEl = dst_face.nEl;
   const auto& IENf = dst_face.IEN;
-  const auto& Xf = dst_face.x;
+  // Note: After load_msh processing, IENf contains mesh node IDs (not face-local indices).
+  // mesh.x has been cleared at this point, so we use com_mod.x (global coordinates) instead.
+  // dst_mesh.gN converts mesh node IDs to global node IDs for accessing com_mod.x.
+  const auto& gX = com_mod.x;
 
   // Allocate array to store the **combined global** node ID of each 1D MPC point.
   src_face.mpc_global_node1d.resize(src_face.nNo);
@@ -2316,9 +2319,11 @@ void match_point_face(const ComMod& com_mod, const mshType& src_mesh, faceType& 
     int mesh_node_1d = src_face.gN(a);
     src_face.mpc_global_node1d(a) = src_mesh.gN[mesh_node_1d];
 
+    // src_face.x contains UNSCALED coordinates (copied before mesh scaling).
+    // com_mod.x contains SCALED coordinates. Scale the point to match.
     Vector<double> xp(nsd);
     for (int i = 0; i < nsd; i++) {
-      xp(i) = src_face.x(i, a);
+      xp(i) = src_face.x(i, a) * src_mesh.scF;
     }
 
     bool located = false;
@@ -2331,9 +2336,11 @@ void match_point_face(const ComMod& com_mod, const mshType& src_mesh, faceType& 
 
     for (int e = 0; e < nEl; e++) {
       for (int b = 0; b < eNoN; b++) {
-        int faceNodeLocal = IENf(b, e);   // index into face node list
+        // After face rearrangement, IENf(b, e) contains global node ID directly.
+        int globalNodeId = IENf(b, e);
         for (int i = 0; i < nsd; i++) {
-          xl(i, b) = Xf(i, faceNodeLocal);
+          xl(i, b) = gX(i, globalNodeId);
+
         }
       }
 
@@ -2344,7 +2351,6 @@ void match_point_face(const ComMod& com_mod, const mshType& src_mesh, faceType& 
         nn::get_xi(nsd_face, dst_face.eType, eNoN, xl, xp, xi, ok);
       } catch (const std::exception&) {
         // Singular mapping for this element; try next.
-        std::cout << "Singular mapping for this element; try next." << std::endl;
         continue;
       }
 
@@ -2362,17 +2368,105 @@ void match_point_face(const ComMod& com_mod, const mshType& src_mesh, faceType& 
 
       // Evaluate shape functions at xi and store interpolation weights.
       nn::get_gnn(nsd_face, dst_face.eType, eNoN, xi, N, Nx);
+      
+      // For triangular elements, also verify all shape functions are non-negative.
+      // This catches cases where xi1 + xi2 > 1 (point outside the triangle).
+      bool valid_shape = true;
+      for (int b = 0; b < eNoN; b++) {
+        if (N(b) < -1e-10) {  // Small tolerance for numerical precision
+          valid_shape = false;
+          break;
+        }
+      }
+      if (!valid_shape) {
+        continue;
+      }
+
+      // Get the volume element ID from the face element.
+      // For tet elements, we need to use volume element nodes, not face element nodes.
+      int vol_elem = -1;
+      if (dst_face.gE.size() > e && dst_face.gE(e) >= 0) {
+        vol_elem = dst_face.gE(e);
+      }
 
       // Save the destination element index and the destination face nodes for the MPC.
       // IENf(b,e) is face-local index when VTP has GlobalNodeID, mesh node ID otherwise.
       // dst_face.gN converts face-local index to per-mesh node ID.
       // dst_mesh.gN converts per-mesh node ID to combined global node ID.
       src_face.mpc_target_element[a] = e;
-      for (int b = 0; b < eNoN; b++) {
-        int face_local = IENf(b, e);
-        int mesh_node_3d = dst_face.gN(face_local);
-        src_face.mpc_nodes(b, a) = dst_mesh.gN[mesh_node_3d];
-        src_face.mpc_weights(b, a) = N(b);
+      
+      // For tet elements, map face nodes to volume element nodes.
+      // This ensures we use the correct volume element nodes for MPC coupling.
+      // Check if vol_elem is valid and within bounds before using it.
+      bool use_vol_elem = (vol_elem >= 0 && 
+                          (dst_mesh.eType == consts::ElementType::TET4 || 
+                           dst_mesh.eType == consts::ElementType::TET10));
+      
+      // Before distribution, use gIEN if available; otherwise use IEN.
+      // Check bounds: vol_elem must be < gnEl (global) or nEl (local).
+      if (use_vol_elem) {
+        int max_elem = (dst_mesh.gIEN.size() > 0) ? dst_mesh.gnEl : dst_mesh.nEl;
+        if (vol_elem >= max_elem) {
+          use_vol_elem = false;
+        }
+      }
+      
+      if (use_vol_elem) {
+        // Use gIEN if available (before distribution), otherwise use IEN.
+        const Array<int>* ien_ptr = nullptr;
+        if (dst_mesh.gIEN.size() > 0 && vol_elem < dst_mesh.gnEl) {
+          ien_ptr = &dst_mesh.gIEN;
+        } else if (vol_elem < dst_mesh.nEl) {
+          ien_ptr = &dst_mesh.IEN;
+        } else {
+          throw std::runtime_error("MPC: Volume element index out of bounds");
+        }
+        const Array<int>& vol_ien = *ien_ptr;
+        
+        // Map face nodes to volume element nodes (similar to gnnb function).
+        Vector<int> ptr(eNoN);
+        std::vector<bool> setIt(dst_mesh.eNoN);
+        std::fill(setIt.begin(), setIt.end(), true);
+        
+        // Find which volume element nodes correspond to face nodes.
+        // Note: After face rearrangement, IENf contains global node IDs.
+        // vol_ien still contains mesh-local node IDs, so convert for comparison.
+        for (int b = 0; b < eNoN; b++) {
+          int face_node_global = IENf(b, e);  // Global node ID after rearrangement
+          bool found = false;
+          for (int ib = 0; ib < dst_mesh.eNoN; ib++) {
+            if (setIt[ib]) {
+              int vol_node_mesh = vol_ien(ib, vol_elem);
+              int vol_node_global = dst_mesh.gN[vol_node_mesh];
+              if (vol_node_global == face_node_global) {
+                ptr(b) = ib;
+                setIt[ib] = false;
+                found = true;
+                break;
+              }
+            }
+          }
+          if (!found) {
+            throw std::runtime_error("MPC: Could not map face node to volume element node for tet element");
+          }
+        }
+        
+        // Use volume element nodes for MPC coupling.
+        // vol_ien contains mesh-local node IDs, convert to global.
+        for (int b = 0; b < eNoN; b++) {
+          int vol_node_local = ptr(b);
+          int vol_node_mesh = vol_ien(vol_node_local, vol_elem);
+          src_face.mpc_nodes(b, a) = dst_mesh.gN[vol_node_mesh];
+          src_face.mpc_weights(b, a) = N(b);
+        }
+      } else {
+        // For hex elements or when volume element is not available, use face nodes directly.
+        // After face rearrangement, IENf contains global node IDs directly.
+        for (int b = 0; b < eNoN; b++) {
+          int global_node_3d = IENf(b, e);  // Global node ID after rearrangement
+          src_face.mpc_nodes(b, a) = global_node_3d;
+          src_face.mpc_weights(b, a) = N(b);
+        }
       }
       located = true;
       break;
