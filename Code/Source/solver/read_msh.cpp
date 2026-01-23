@@ -2164,9 +2164,30 @@ void set_projector_end_nodes(Simulation* simulation, utils::stackType& avNds)
     all_fun::find_face(com_mod.msh, ctmpj, jM, jFa);
     auto& face2 = com_mod.msh[jM].fa[jFa];
 
-    // Skip 1D/3D mixing: end-nodes only for non-fiber meshes.
+    // Fiber projections have two different meanings:
+    // - End_nodes_face_file_path: legacy "unify these 1D end nodes with matching 3D face nodes".
+    // - Mpc_nodes_file_path: new MPC mapping; MUST NOT unify global node IDs here.
+    //
+    // So: only skip a projection involving fiber meshes if the fiber face was provided via
+    // Mpc_nodes_file_path. This restores end-node coupling while keeping MPC behavior correct.
     if (com_mod.msh[iM].lFib || com_mod.msh[jM].lFib) {
-      continue;
+      auto is_mpc_face_by_name = [&](const std::string& face_name) -> bool {
+        for (auto mp : simulation->parameters.mesh_parameters) {
+          for (auto fp : mp->face_parameters) {
+            if (fp->name() == face_name) {
+              if (fp->mpc_nodes_file_path.defined() && fp->mpc_nodes_file_path() != "") {
+                return true;
+              }
+              return false;
+            }
+          }
+        }
+        return false;
+      };
+
+      if (is_mpc_face_by_name(ctmpi) || is_mpc_face_by_name(ctmpj)) {
+        continue;
+      }
     }
 
     double tol = params->projection_tolerance();
