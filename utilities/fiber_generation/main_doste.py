@@ -1,4 +1,6 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) Stanford University, The Regents of the University of California, and others.
+# SPDX-License-Identifier: BSD-3-Clause
 # -*-coding:utf-8 -*-
 """Main script for generating biventricular fibers using the Doste method.
 

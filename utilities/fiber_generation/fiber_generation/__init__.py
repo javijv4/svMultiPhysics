@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) Stanford University, The Regents of the University of California, and others.
+# SPDX-License-Identifier: BSD-3-Clause
 """Fiber generation package for biventricular heart models.
 
 This package provides classes and utilities to generate myocardial fiber
