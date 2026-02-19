@@ -52,7 +52,7 @@ void cep_init(Simulation* simulation)
         for (int iDmn = 0; iDmn < eq.nDmn; iDmn++) {
           auto cPhys = eq.dmn[iDmn].phys;
           int dID = eq.dmn[iDmn].Id;
-          if ((cPhys != EquationType::phys_CEP) || !utils::btest(com_mod.dmnId(a),dID)) {
+          if ((cPhys != EquationType::phys_CEP) || (dID >= 0 && !utils::btest(com_mod.dmnId(a),dID))) {
             continue;
           }
           int nX = eq.dmn[iDmn].cep.nX;
@@ -220,9 +220,9 @@ void cep_integ(Simulation* simulation, const int iEq, const int iDof, const Arra
         auto cPhys = dmn.phys;
         int dID = dmn.Id;
 
-        if (cPhys != Equation_CEP || !utils::btest(com_mod.dmnId(Ac),dID)) {
+        if (cPhys != Equation_CEP || (dID >= 0 && !utils::btest(com_mod.dmnId(Ac),dID))) {
           continue;
-	}
+	      }
 
         int nX = dmn.cep.nX;
         int nG = dmn.cep.nG;
