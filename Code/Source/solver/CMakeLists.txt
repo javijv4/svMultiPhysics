@@ -196,6 +196,7 @@ set(CSRCS
   mesh.h mesh.cpp
   nn.h nn.cpp
   output.h output.cpp
+  PointProjector.h PointProjector.cpp
   load_msh.h load_msh.cpp
   post.h post.cpp
   read_files.h read_files.cpp

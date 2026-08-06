@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "ComMod.h"
+#include "PointProjector.h"
 
 #include <iostream>
 
@@ -35,6 +36,7 @@ ComMod::ComMod()
   sstEq        = false;
   ibFlag       = false;
   risFlag      = false;
+  point_projectors = std::make_unique<PointProjectorManager>();
 
 }
 

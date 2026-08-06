@@ -13,6 +13,9 @@ void b_heats(ComMod& com_mod, const int eNoN, const double w, const Vector<doubl
 
 void construct_heats(ComMod& com_mod, const mshType& lM, const SolutionStates& solutions);
 
+void heats_1d(ComMod& com_mod, const int eNoN, const double w, const Vector<double>& N, const Array<double>& Nx,
+    const Array<double>& al, const Array<double>& yl, Array<double>& lR, Array3<double>& lK);
+
 void heats_2d(ComMod& com_mod, const int eNoN, const double w, const Vector<double>& N, const Array<double>& Nx, 
     const Array<double>& al, const Array<double>& yl, Array<double>& lR, Array3<double>& lK);
 

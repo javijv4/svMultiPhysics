@@ -3,6 +3,7 @@
 
 #include "Integrator.h"
 #include "Core/Exception.h"
+#include "PointProjector.h"
 #include "all_fun.h"
 #include "bf.h"
 #include "cep_ion.h"
@@ -303,6 +304,10 @@ void Integrator::solve_linear_system() {
   DebugMsg dmsg(__func__, com_mod.cm.idcm());
   dmsg << "Solving equation: " << eq.sym;
   #endif
+
+  if (com_mod.point_projectors->has_mpc()) {
+    com_mod.point_projectors->apply_mpc_constraints(com_mod, incL_, res_);
+  }
 
   ls_ns::ls_solve(com_mod, eq, incL_, res_);
 

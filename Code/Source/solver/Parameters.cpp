@@ -2935,6 +2935,7 @@ FaceParameters::FaceParameters() {
 
   set_parameter("End_nodes_face_file_path", "", !required,
                 end_nodes_face_file_path);
+  set_parameter("Mpc_nodes_file_path", "", !required, mpc_nodes_file_path);
   set_parameter("Face_file_path", "", !required, face_file_path);
 
   set_parameter("Quadrature_modifier_TRI3", (2.0 / 3.0), !required,
@@ -3219,7 +3220,10 @@ ProjectionParameters::ProjectionParameters() {
 
   name = Parameter<std::string>("name", "", required);
 
-  set_parameter("Project_from_face", "", required, project_from_face);
+  // Optional: omitted Coupling_method defaults to EndNodes (legacy FSI/URIS Add_projection).
+  set_parameter("Coupling_method", "", !required, coupling_method);
+  set_parameter("Project_from_face", "", !required, project_from_face);
+  set_parameter("Project_from_mesh", "", !required, project_from_mesh);
   set_parameter("Projection_tolerance", 0.0, !required, projection_tolerance);
 }
 
@@ -3238,6 +3242,38 @@ void ProjectionParameters::set_values(tinyxml2::XMLElement *xml_elem) {
       std::bind(&ProjectionParameters::set_parameter_value, *this, _1, _2);
 
   xml_util_set_parameters(ftpr, xml_elem, error_msg);
+
+  check_required();
+
+  // Legacy Add_projection blocks (FSI/URIS) omit Coupling_method; treat as EndNodes.
+  if (!coupling_method.defined() || coupling_method() == "") {
+    coupling_method.set("EndNodes");
+  }
+
+  if (coupling_method() != "EndNodes" && coupling_method() != "MPC") {
+    svmp::raise<svmp::ParseException>(svmp::Diagnostic(
+        "Unknown Coupling_method '" + coupling_method() + "' for Add_projection '" + name() + "'."));
+  }
+
+  const bool has_face = project_from_face.defined() && project_from_face() != "";
+  const bool has_mesh = project_from_mesh.defined() && project_from_mesh() != "";
+
+  if (coupling_method() == "EndNodes") {
+    if (!has_face) {
+      svmp::raise<svmp::ParseException>(svmp::Diagnostic(
+          "Add_projection '" + name() + "' with Coupling_method EndNodes requires Project_from_face."));
+    }
+    if (has_mesh) {
+      svmp::raise<svmp::ParseException>(svmp::Diagnostic(
+          "Add_projection '" + name() + "' with Coupling_method EndNodes cannot use Project_from_mesh."));
+    }
+  } else if (coupling_method() == "MPC") {
+    if (has_face == has_mesh) {
+      svmp::raise<svmp::ParseException>(svmp::Diagnostic(
+          "Add_projection '" + name() + "' with Coupling_method MPC requires exactly one of "
+          "Project_from_face or Project_from_mesh."));
+    }
+  }
 }
 
 //////////////////////////////////////////////////////////

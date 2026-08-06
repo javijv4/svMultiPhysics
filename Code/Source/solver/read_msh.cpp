@@ -5,6 +5,7 @@
 
 #include "Array.h"
 #include "ComMod.h"
+#include "PointProjector.h"
 #include "Vector.h"
 
 #include "all_fun.h"
@@ -1247,7 +1248,8 @@ void read_msh(Simulation* simulation)
   //
   utils::stackType avNds;
 
-  set_projector(simulation, avNds);
+  com_mod.point_projectors->create_from_parameters(simulation);
+  com_mod.point_projectors->setup_end_nodes(simulation, avNds);
 
   for (int iM = 0; iM < com_mod.nMsh; iM++) {
     auto& mesh = com_mod.msh[iM];
@@ -1414,6 +1416,8 @@ void read_msh(Simulation* simulation)
       } 
     }  
   }  
+
+  com_mod.point_projectors->setup_mpc(simulation);
 
   if (com_mod.resetSim) {
     auto& rmsh = com_mod.rmsh;
@@ -2112,143 +2116,6 @@ void set_dmn_id_vtk(Simulation* simulation, mshType& lM, const std::string& file
     lM.eId(a) = lM.eId(a) | (1UL << element_data(a));
   }
 
-}
-
-/// @brief Associate two faces with each other and set gN.
-///
-/// Data set
-/// \code {.cpp}
-///   mesh.gpN = Vector<int>(gnNo);
-///   com_mod.msh[].gpN = Vector<int>(gnNo);
-///   com_mod.gtnNo 
-///   com_mod.msh[].gN[]
-/// \endcode
-//
-void set_projector(Simulation* simulation, utils::stackType& avNds)
-{
-  #define n_debug_set_projector 
-  #ifdef debug_set_projector
-  DebugMsg dmsg(__func__, simulation->com_mod.cm.idcm());
-  dmsg.banner();
-  #endif
-
-  auto& com_mod = simulation->get_com_mod();
-  int nPrj = simulation->parameters.projection_parameters.size();
-
-  if (nPrj > 0) {
-    for (int iM = 0; iM < com_mod.nMsh; iM++) {
-      auto& mesh = com_mod.msh[iM];
-      int gnNo = mesh.gnNo;
-      mesh.gpN = Vector<int>(gnNo);
-    }
-  }
-
-  // Calculate an upper limit for the number required stacks
-  //
-  int nStk = 0;
-  for (auto& params : simulation->parameters.projection_parameters) { 
-    auto ctmpi = params->name();
-    int iM, iFa;
-    all_fun::find_face(com_mod.msh, ctmpi, iM, iFa);
-    nStk = nStk + com_mod.msh[iM].fa[iFa].nNo;
-  }
-  std::vector<utils::stackType> stk(nStk);
-  utils::stackType lPrj;
-  #ifdef debug_set_projector
-  dmsg << "nStk: " << nStk;
-  #endif
-
-  // Match the nodal coordinates for each projection face.
-  //
-  for (auto& params : simulation->parameters.projection_parameters) { 
-    int iM, iFa;
-    auto ctmpi = params->name();
-    all_fun::find_face(com_mod.msh, ctmpi, iM, iFa);
-    auto& face1 = com_mod.msh[iM].fa[iFa];
-    #ifdef debug_set_projector
-    dmsg << "iM: " << iM;
-    dmsg << "iFa: " << iFa;
-    dmsg << "face1.name: " << face1.name;
-    #endif
-
-    int jM, jFa;
-    auto ctmpj = params->project_from_face();
-    all_fun::find_face(com_mod.msh, ctmpj, jM, jFa);
-    auto& face2 = com_mod.msh[jM].fa[jFa];
-    #ifdef debug_set_projector
-    dmsg << "jM: " << jM;
-    dmsg << "jFa: " << jFa;
-    dmsg << "face2.name: " << face2.name;
-    #endif
-
-    double tol = params->projection_tolerance();
-
-    // Match face nodes?
-    match_faces(com_mod, face1, face2, tol, lPrj);
-
-    while (true) {
-      int ia, ja, i, j, k;
-
-      if (!utils::pull_stack(lPrj,ja)) {
-        break;
-      }
-
-      if (!utils::pull_stack(lPrj,ia)) {
-        break;
-      }
-
-      i = com_mod.msh[iM].gN[ia];
-      j = com_mod.msh[jM].gN[ja];
-
-      if (i == -1) {
-        if (j == -1) {
-          // Since neither of them have value add a new node and both of them to the stack.
-          if (!utils::pull_stack(avNds, k)) {
-            k = com_mod.gtnNo;
-            com_mod.gtnNo = com_mod.gtnNo + 1;
-          }
-          com_mod.msh[iM].gN[ia] = k;
-          com_mod.msh[jM].gN[ja] = k;
-
-          push_stack(stk[k], {iM,ia,jM,ja});
-
-        // This is the case one of them has already been assigned. So just using that value for the other one
-        } else { 
-          com_mod.msh[iM].gN[ia] = j;
-          push_stack(stk[j], {iM,ia});
-        }
-      } else { 
-        if (j == -1) {
-          com_mod.msh[jM].gN[ja] = i;
-          push_stack(stk[i], {jM,ja});
-
-        // Since they are both already have assigned values, I will move the
-        // nodes from stack with bigger ID, j, to the other stack, i.
-        } else { 
-          if (i == j) {
-            continue; 
-          }
-          if (i > j) {
-            k = i;
-            i = j;
-            j = k;
-          } 
-          while (true) {
-            int kM;
-            if (!utils::pull_stack(stk[j],ja)) {
-              break; 
-            }
-            if (!utils::pull_stack(stk[j],kM)) { 
-              break; 
-            }
-            com_mod.msh[kM].gN[ja] = i;
-            push_stack(stk[i], {kM,ja});
-          } 
-          utils::push_stack(avNds, j);
-        } 
-      } 
-    }
-  }
 }
 
 };

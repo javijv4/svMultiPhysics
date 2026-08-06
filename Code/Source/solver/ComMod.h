@@ -1572,6 +1572,8 @@ class urisType
 
 };
 
+class PointProjectorManager;
+
 /// @brief The ComMod class duplicates the data structures in the Fortran COMMOD module
 /// defined in MOD.f. 
 ///
@@ -1884,6 +1886,9 @@ class ComMod {
 
     /// @brief unfitted RIS object
     std::vector<urisType> uris;
+
+    /// @brief Add_projection coupling manager for end-node and MPC point projectors.
+    std::unique_ptr<PointProjectorManager> point_projectors;
 
     bool debug_active = false;
 

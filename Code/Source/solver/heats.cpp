@@ -38,15 +38,20 @@ void construct_heats(ComMod& com_mod, const mshType& lM, const SolutionStates& s
   const auto& eq = com_mod.eq[cEq];
   auto& cDmn = com_mod.cDmn;
 
- int eNoN = lM.eNoN;
+  int eNoN = lM.eNoN;
+  int insd = nsd;
+  if (lM.lFib) {
+    insd = 1;
+  }
   #ifdef debug_construct_heats
   dmsg << "cEq: " << cEq;
   dmsg << "cDmn: " << cDmn;
+  dmsg << "insd: " << insd;
   #endif
 
   Vector<int> ptr(eNoN);
   Vector<double> N(eNoN);
-  Array<double> xl(nsd,eNoN), al(tDof,eNoN), yl(tDof,eNoN), Nx(nsd,eNoN), lR(dof,eNoN);
+  Array<double> xl(nsd,eNoN), al(tDof,eNoN), yl(tDof,eNoN), Nx(insd,eNoN), lR(dof,eNoN);
   Array3<double> lK(dof*dof,eNoN,eNoN);
   Array<double> ksix(nsd,nsd); 
 
@@ -88,7 +93,7 @@ void construct_heats(ComMod& com_mod, const mshType& lM, const SolutionStates& s
     for (int g = 0; g < lM.nG; g++) {
       if (g == 0 || !lM.lShpF) {
         auto Nx_g = lM.Nx.slice(g);
-        nn::gnn(eNoN, nsd, nsd, Nx_g, xl, Nx, Jac, ksix);
+        nn::gnn(eNoN, nsd, insd, Nx_g, xl, Nx, Jac, ksix);
         if (utils::is_zero(Jac)) {
           throw std::runtime_error("[construct_heats] Jacobian for element " + std::to_string(e) + " is < 0.");
         }
@@ -97,14 +102,55 @@ void construct_heats(ComMod& com_mod, const mshType& lM, const SolutionStates& s
       double w = lM.w(g) * Jac;
       N = lM.N.col(g);
 
-      if (nsd == 3) {
+      if (insd == 3) {
         heats_3d(com_mod, eNoN, w, N, Nx, al, yl, lR, lK);
-      } else if (nsd == 2) {
+      } else if (insd == 2) {
         heats_2d(com_mod, eNoN, w, N, Nx, al, yl, lR, lK);
+      } else if (insd == 1) {
+        heats_1d(com_mod, eNoN, w, N, Nx, al, yl, lR, lK);
       }
     }
 
     eq.linear_algebra->assemble(com_mod, eNoN, ptr, lK, lR);
+  }
+}
+
+void heats_1d(ComMod& com_mod, const int eNoN, const double w, const Vector<double>& N, const Array<double>& Nx,
+    const Array<double>& al, const Array<double>& yl, Array<double>& lR, Array3<double>& lK)
+{
+  using namespace consts;
+
+  const int cEq = com_mod.cEq;
+  auto& eq = com_mod.eq[cEq];
+  const int cDmn = com_mod.cDmn;
+  auto& dmn = eq.dmn[cDmn];
+  const double dt = com_mod.dt;
+  const int i = eq.s;
+
+  double nu = dmn.prop.at(PhysicalProperyType::conductivity);
+  double s = dmn.prop.at(PhysicalProperyType::source_term);
+  double rho = dmn.prop.at(PhysicalProperyType::solid_density);
+
+  double T1 = eq.af * eq.gam * dt;
+  double amd = eq.am * rho / T1;
+  double wl = w * T1;
+
+  double Td = -s;
+  double Tx = 0.0;
+
+  for (int a = 0; a < eNoN; a++) {
+    Td = Td + N(a)*al(i,a);
+    Tx = Tx + Nx(0,a)*yl(i,a);
+  }
+
+  Td = Td * rho;
+
+  for (int a = 0; a < eNoN; a++) {
+    lR(0,a) = lR(0,a) + w*(N(a)*Td + Nx(0,a)*Tx*nu);
+
+    for (int b = 0; b < eNoN; b++) {
+      lK(0,a,b) = lK(0,a,b) + wl*(N(a)*N(b)*amd + nu*Nx(0,a)*Nx(0,b));
+    }
   }
 }
 

@@ -948,7 +948,12 @@ class PrecomputedSolutionParameters: public ParameterLists
 /// <Add_projection name="wall_inner" >
 ///   <Project_from_face> lumen_wall </Project_from_face>
 /// </Add_projection>
+/// <Add_projection name="fc_efib" >
+///   <Coupling_method> MPC </Coupling_method>
+///   <Project_from_mesh> tissue </Project_from_mesh>
+/// </Add_projection>
 /// \endcode
+/// Coupling_method is optional; omitted defaults to EndNodes (legacy FSI/URIS).
 class ProjectionParameters : public ParameterLists
 {
   public:
@@ -960,7 +965,9 @@ class ProjectionParameters : public ParameterLists
 
      Parameter<std::string> name;
 
+     Parameter<std::string> coupling_method;
      Parameter<std::string> project_from_face;
+     Parameter<std::string> project_from_mesh;
      Parameter<double> projection_tolerance;
 };
 
@@ -1858,6 +1865,7 @@ class FaceParameters : public ParameterLists
 
     Parameter<std::string> end_nodes_face_file_path;
     Parameter<std::string> face_file_path;
+    Parameter<std::string> mpc_nodes_file_path;
     Parameter<std::string> name;
 
     Parameter<double> quadrature_modifier_TRI3;

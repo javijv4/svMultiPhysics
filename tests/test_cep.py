@@ -42,6 +42,11 @@ def test_cylinder_purkinje_1d3d(n_proc):
     run_with_reference(base_folder, test_folder, fields, n_proc)
 
 
+def test_cylinder_purkinje_1d3d_mpc(n_proc):
+    test_folder = "cylinder_purkinje_1d3d_mpc"
+    run_with_reference(base_folder, test_folder, ["Membrane_potential"], n_proc)
+
+
 @pytest.mark.parametrize("domain_definition", ["dat", "vtu"])
 def test_slab_domains(domain_definition, n_proc):
     test_folder = "slab_domains"

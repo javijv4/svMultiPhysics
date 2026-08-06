@@ -54,7 +54,6 @@ namespace read_msh_ns {
 
   void set_dmn_id_ff(Simulation* simulation, mshType& mesh, const std::string& file_name);
   void set_dmn_id_vtk(Simulation* simulation, mshType& lM, const std::string& file_name, const std::string& kwrd);
-  void set_projector(Simulation* simulation, utils::stackType& avNds);
   void set_ris_projector(Simulation* simulation);
   void set_uris_meshes(Simulation* simulation);
   

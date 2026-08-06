@@ -141,6 +141,49 @@ void read_ndnlff(const std::string& file_name, faceType& face)
   face.eNoN = 1;
 }
 
+static void read_mpc_nodes(const int nsd, const mshType& mesh, const std::string& file_name, faceType& face)
+{
+  std::ifstream mpc_nodes_file;
+  mpc_nodes_file.open(file_name);
+  if (!mpc_nodes_file.is_open()) {
+    throw std::runtime_error("Failed to open the mpc nodes face file '" + file_name + "'.");
+  }
+
+  int node_id;
+  std::string str_value;
+  std::vector<int> node_ids;
+
+  while (mpc_nodes_file >> str_value) {
+    std::istringstream str_stream(str_value);
+    if (!(str_stream >> node_id)) {
+      throw std::runtime_error("Incorrect integer value '" + str_value + "' found in mpc nodes face file '" + file_name + "'.");
+    }
+    node_ids.push_back(node_id);
+  }
+
+  if (node_ids.empty()) {
+    throw std::runtime_error("Failed to read the mpc nodes face file '" + file_name + "'.");
+  }
+
+  face.nNo = static_cast<int>(node_ids.size());
+  face.gN = Vector<int>(face.nNo);
+  face.x.resize(nsd, face.nNo);
+  face.nEl = 0;
+  face.eNoN = 1;
+
+  for (int a = 0; a < face.nNo; a++) {
+    const int Ac = node_ids[a] - 1;
+    if (Ac < 0 || Ac >= mesh.gnNo) {
+      throw std::runtime_error("Node ID '" + std::to_string(node_ids[a]) + "' in mpc nodes face file '" +
+          file_name + "' is outside the mesh node range.");
+    }
+    face.gN[a] = Ac;
+    for (int i = 0; i < nsd; i++) {
+      face.x(i, a) = mesh.x(i, Ac);
+    }
+  }
+}
+
 /// @brief Create data for a mesh.
 ///
 /// Replicates Fortran READSV subroutine defined in LOADMSH.f.
@@ -224,16 +267,24 @@ void read_sv(Simulation* simulation, mshType& mesh, const MeshParameters* mesh_p
 #endif
 
             if (mesh.lFib) {
-                auto face_path = face_param->end_nodes_face_file_path();
+                auto end_nodes_path = face_param->end_nodes_face_file_path();
+                auto mpc_nodes_path = face_param->mpc_nodes_file_path();
 #ifdef dbg_read_sv
-                dmsg << "Read end nodes face file ... " << " ";
-                dmsg << "face_path: " << face_path;
+                dmsg << "Read 1D face node file ... " << " ";
+                dmsg << "end_nodes_path: " << end_nodes_path;
+                dmsg << "mpc_nodes_path: " << mpc_nodes_path;
 #endif
-                if (face_path == "") {
-                    throw std::runtime_error("No end nodes face file path provided.");
+                if (end_nodes_path != "" && mpc_nodes_path != "") {
+                    throw std::runtime_error("Only one of End_nodes_face_file_path or Mpc_nodes_file_path may be provided for fiber face '" + face.name + "'.");
                 }
 
-                read_ndnlff(face_path, face);
+                if (mpc_nodes_path != "") {
+                    read_mpc_nodes(simulation->com_mod.nsd, mesh, mpc_nodes_path, face);
+                } else if (end_nodes_path != "") {
+                    read_ndnlff(end_nodes_path, face);
+                } else {
+                    throw std::runtime_error("No end nodes or mpc nodes face file path provided for fiber face '" + face.name + "'.");
+                }
 
             } else {
                 auto face_path = face_param->face_file_path();

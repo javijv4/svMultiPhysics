@@ -6,6 +6,7 @@
 #include "distribute.h"
 
 #include "ComMod.h"
+#include "PointProjector.h"
 #include "all_fun.h"
 #include "consts.h"
 #include "nn.h"
@@ -160,6 +161,7 @@ void distribute(Simulation* simulation)
     dist_uris(com_mod, cm_mod, cm);
   }
 
+  com_mod.point_projectors->distribute(com_mod, cm_mod, cm);
 
   int risProc = -1;
   int jM = 0;
