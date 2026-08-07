@@ -89,6 +89,7 @@ RTOL = {
     "Stress": 1.0e-4,
     "Strain": 1.0e-10,
     "Temperature": 1.0e-10,
+    "MBF": 1.0e-10,
     "Traction": 1.0e-6,
     "Velocity": 1.0e-7,
     "VonMises_stress": 1.0e-3,

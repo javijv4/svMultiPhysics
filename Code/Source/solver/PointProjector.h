@@ -89,7 +89,11 @@ class PointProjectorManager {
     void setup_mpc(Simulation* simulation);
     void distribute(ComMod& com_mod, CmMod& cm_mod, cmType& cm);
     bool has_mpc() const;
-    void apply_mpc_constraints(ComMod& com_mod, const Vector<int>& incL, const Vector<double>& res) const;
+    /// Enforce MPC constraints B*(Yn - (gam*dt)*R) = 0 on the updated primary field.
+    /// @param Yn Current primary solution (before applying the linear solve increment in R).
+    /// @param y_update_coef Coefficient mapping solve output R into a Yn update: Yn <- Yn - coef*R.
+    void apply_mpc_constraints(ComMod& com_mod, const Vector<int>& incL, const Vector<double>& res,
+                               const Array<double>& Yn, double y_update_coef) const;
 
   private:
     std::vector<std::unique_ptr<PointProjector>> projectors_;

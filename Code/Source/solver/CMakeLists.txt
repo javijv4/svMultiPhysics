@@ -185,6 +185,7 @@ set(CSRCS
   fs.h fs.cpp
   heatf.h heatf.cpp
   heats.h heats.cpp
+  darcy.h darcy.cpp
   initialize.h initialize.cpp
   Integrator.h Integrator.cpp
   l_elas.h l_elas.cpp

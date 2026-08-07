@@ -316,11 +316,12 @@ void txt(Simulation* simulation, const bool init_write, const SolutionStates& so
           l = 1;
         break;
 
-        case OutputNameType::outGrp_eFlx: 
-        case OutputNameType::outGrp_hFlx: 
-        case OutputNameType::outGrp_divV: 
-        case OutputNameType::outGrp_J: 
+        case OutputNameType::outGrp_eFlx:
+        case OutputNameType::outGrp_hFlx:
+        case OutputNameType::outGrp_divV:
+        case OutputNameType::outGrp_J:
         case OutputNameType::outGrp_mises:
+        case OutputNameType::outGrp_mbfFlx:
           post::all_post(simulation, tmpV, solutions, oGrp, iEq);
         break;
 

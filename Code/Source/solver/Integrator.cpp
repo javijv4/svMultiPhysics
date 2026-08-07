@@ -306,7 +306,10 @@ void Integrator::solve_linear_system() {
   #endif
 
   if (com_mod.point_projectors->has_mpc()) {
-    com_mod.point_projectors->apply_mpc_constraints(com_mod, incL_, res_);
+    // Corrector applies Yn <- Yn - (eq.gam*dt)*R, so MPC must constrain that updated field.
+    const double y_update_coef = eq.gam * com_mod.dt;
+    com_mod.point_projectors->apply_mpc_constraints(
+        com_mod, incL_, res_, solutions_.current.get_velocity(), y_update_coef);
   }
 
   ls_ns::ls_solve(com_mod, eq, incL_, res_);

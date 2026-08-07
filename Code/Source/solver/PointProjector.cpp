@@ -497,14 +497,17 @@ bool PointProjectorManager::has_mpc() const
 }
 
 void PointProjectorManager::apply_mpc_constraints(ComMod& com_mod, const Vector<int>& incL,
-                                                  const Vector<double>& res) const
+                                                  const Vector<double>& res, const Array<double>& Yn,
+                                                  double y_update_coef) const
 {
   if (!has_mpc()) {
     return;
   }
 
   auto& eq = com_mod.eq[com_mod.cEq];
-  if (!(eq.phys == consts::EquationType::phys_CEP || eq.phys == consts::EquationType::phys_heatS)) {
+  if (!(eq.phys == consts::EquationType::phys_CEP ||
+        eq.phys == consts::EquationType::phys_heatS ||
+        eq.phys == consts::EquationType::phys_darcy)) {
     return;
   }
 
@@ -512,7 +515,12 @@ void PointProjectorManager::apply_mpc_constraints(ComMod& com_mod, const Vector<
     return;
   }
 
+  if (utils::is_zero(y_update_coef)) {
+    throw std::runtime_error("[PointProjectorManager::apply_mpc_constraints] y_update_coef must be non-zero.");
+  }
+
   constexpr int mpc_dof = 0;
+  const int eq_dof = eq.s + mpc_dof;
 
   std::unordered_map<int, int> gtl_map;
   for (int local = 0; local < com_mod.lhs.mynNo; local++) {
@@ -536,7 +544,9 @@ void PointProjectorManager::apply_mpc_constraints(ComMod& com_mod, const Vector<
     return;
   }
 
-  auto eval_Bx_local = [&](Vector<double>& y_out) {
+  // Constraint is on the updated primary unknown: B*(Yn - y_update_coef * R) = 0
+  // i.e. B*R = B*Yn / y_update_coef. Evaluate g = B*R - B*Yn / y_update_coef.
+  auto eval_Bx_local = [&](Vector<double>& y_out, bool include_yn_inhomogeneity) {
     y_out.resize(m);
     y_out = 0.0;
     for (int i = 0; i < m; i++) {
@@ -547,12 +557,18 @@ void PointProjectorManager::apply_mpc_constraints(ComMod& com_mod, const Vector<
         const int n3_local = gtl(row.node3d[k]);
         if (n3_local >= 0) {
           val += row.weights[k] * com_mod.R(mpc_dof, n3_local);
+          if (include_yn_inhomogeneity) {
+            val -= row.weights[k] * Yn(eq_dof, n3_local) / y_update_coef;
+          }
         }
       }
 
       const int n1_local = gtl(row.node1d);
       if (n1_local >= 0) {
         val -= com_mod.R(mpc_dof, n1_local);
+        if (include_yn_inhomogeneity) {
+          val += Yn(eq_dof, n1_local) / y_update_coef;
+        }
       }
 
       y_out(i) = val;
@@ -569,7 +585,7 @@ void PointProjectorManager::apply_mpc_constraints(ComMod& com_mod, const Vector<
   eq.linear_algebra->solve(com_mod, eq, incL, res);
 
   Vector<double> g_local;
-  eval_Bx_local(g_local);
+  eval_Bx_local(g_local, true);
   CmMod cm_mod;
   Vector<double> g = com_mod.cm.reduce(cm_mod, g_local, MPI_SUM);
 
@@ -596,7 +612,7 @@ void PointProjectorManager::apply_mpc_constraints(ComMod& com_mod, const Vector<
     eq.linear_algebra->solve(com_mod, eq, incL, res);
 
     Vector<double> y_local;
-    eval_Bx_local(y_local);
+    eval_Bx_local(y_local, false);
     Vector<double> y = com_mod.cm.reduce(cm_mod, y_local, MPI_SUM);
 
     for (int i = 0; i < m; i++) {
