@@ -11,6 +11,7 @@
 #include "consts.h"
 #include "load_msh.h"
 #include "nn.h"
+#include "PointLocator.h"
 #include "read_msh.h"
 #include "utils.h"
 #include "vtk_xml.h"
@@ -859,6 +860,8 @@ void load_var_ini(Simulation* simulation, ComMod& com_mod)
 // Match isoparameteric faces to each other. 
 //
 // Project nodes from two adjacent meshes to each other based on a L2 norm.
+// Used by Add_projection, including Purkinje end-nodes projection onto a
+// myocardial face (negative Projection_tolerance => accept nearest neighbor).
 //
 void match_faces(const ComMod& com_mod, const faceType& lFa, const faceType& pFa, const double ptol, utils::stackType& lPrj)
 {
@@ -898,118 +901,43 @@ void match_faces(const ComMod& com_mod, const faceType& lFa, const faceType& pFa
     tol = ptol;
   }
 
-  // We want to have approximately 1000 nodes in each block. So we
-  // calculate nBkd, which is the number of separate blockes in each
-  // direction, based on that.
-  //
-  int a = pFa.nNo;
-  int nBkd = static_cast<int>( pow(a/1000.0, 0.333) + 0.5) ;
-  if (nBkd == 0) {
-    nBkd = 1;
+  const int nsd = com_mod.nsd;
+
+  // Build the target-face point cloud and query it with PointLocator.
+  Array<double> target_points(nsd, pFa.nNo);
+  for (int b = 0; b < pFa.nNo; b++) {
+    target_points.set_col(b, com_mod.x.col(pFa.gN[b] + jSh));
   }
-  int nsd = com_mod.nsd;;
-  int nBk = pow(nBkd, nsd);
-  #ifdef debug_match_faces
-  dmsg << "a: " << a;
-  dmsg << "nBkd: " << nBkd;
-  dmsg << "nBk: " << nBk;
-  #endif
+  const svmp::PointLocator locator(target_points);
 
-  // Find the extents of the domain and size of each block.
-  //
-  auto lfa_nodes = lFa.gN + iSh;
-  auto pfa_nodes = pFa.gN + jSh;
-  Vector<double> xMin(com_mod.nsd), xMax(com_mod.nsd);
-
-  for (int i = 0; i < nsd; i++) {
-    auto lfa_coords = com_mod.x.rows(i, lfa_nodes);
-    auto pfa_coords = com_mod.x.rows(i, pfa_nodes);
-    xMin[i] = std::min(lfa_coords.min(), pfa_coords.min());
-    xMax[i] = std::max(lfa_coords.max(), pfa_coords.max());
-
-    if (xMin[i] < 0.0) {
-      xMin[i] = xMin[i]*(1.0+eps);
-    } else { 
-      xMin[i] = xMin[i]*(1.0-eps);
-    } 
-
-    if (xMax[i] < 0.0) { 
-      xMax[i] = xMax[i]*(1.0-eps);
-    } else { 
-      xMax[i] = xMax[i]*(1.0+eps);
-    } 
-  }
-
-  auto dx = (xMax - xMin) / static_cast<double>(nBkd);
-  std::vector<bool> nFlt(nsd);
-
-  for (int i = 0; i < nsd; i++) {
-    if (utils::is_zero(dx[i])) {
-      nFlt[i] = false;
-    } else {
-      nFlt[i] = true;
-    } 
-  }
-  
-  Vector<int> nodeBlk(a); 
-  std::vector<blkType> blk(nBk);
-
-  // Find an estimation for size of each block
-  //
-  for (int a = 0; a < pFa.nNo; a++) {
-    int Ac  = pFa.gN[a] + jSh;
-    auto coord = com_mod.x.col(Ac);
-    int iBk = find_blk(nsd, nBkd, nFlt, xMin, dx, coord);
-    nodeBlk[a] = iBk;
-    blk[iBk].n = blk[iBk].n + 1;
-  }
-
-  for (int iBk = 0; iBk < nBk; iBk++) {
-    blk[iBk].gN = Vector<int>(blk[iBk].n);
-    blk[iBk].n = 0;
-  }
-
-  for (int a = 0; a < pFa.nNo; a++) {
-    int Ac = pFa.gN[a];
-    int iBk = nodeBlk[a];
-    blk[iBk].gN(blk[iBk].n) = Ac;
-    blk[iBk].n = blk[iBk].n + 1;
-  } 
-
-  // Doing the calculation for every single node on this face.
-  //
-  int cnt  = 0;
+  int cnt = 0;
 
   for (int a = 0; a < lFa.nNo; a++) {
-    int Ac  = lFa.gN[a];
-    auto coord = com_mod.x.col(Ac+iSh);
-    int iBk = find_blk(nsd, nBkd, nFlt, xMin, dx, coord);
+    const int Ac = lFa.gN[a];
+    const Vector<double> query = com_mod.x.col(Ac + iSh);
 
-    // Check all nodes on the other face.
-    auto minS = std::numeric_limits<double>::max();
-    int i;
-
-    for (int b = 0; b < blk[iBk].n; b++) {
-      int Bc = blk[iBk].gN[b];
-      if ((iM == jM) && (Ac == Bc)) {
-        continue;
-      }
-
-      auto diff = com_mod.x.col(Bc+jSh) - com_mod.x.col(Ac+iSh);
-      double ds = sqrt(diff*diff); 
-
-      if (ds < minS) { 
-        minS = ds;
-        i = Bc;
+    // Same-mesh projections must not map a node onto itself.
+    std::optional<int> exclude_index;
+    if (iM == jM) {
+      for (int b = 0; b < pFa.nNo; b++) {
+        if (pFa.gN[b] == Ac) {
+          exclude_index = b;
+          break;
+        }
       }
     }
 
-    int Bc = i;
+    const auto nearest = locator.find_nearest_neighbor(query, exclude_index);
+    if (!nearest.has_value()) {
+      throw std::runtime_error("Failed to find a nearest neighbor on face " + pFa.name + ".");
+    }
+
+    const double minS = nearest->distance;
+    const int Bc = pFa.gN[nearest->point_index];
 
     if (tol < 0.0) {
       push_stack(lPrj, {Ac, Bc});
       cnt = cnt + 1;
-
     } else if (minS < tol) {
       push_stack(lPrj, {Ac, Bc});
       cnt = cnt + 1;
