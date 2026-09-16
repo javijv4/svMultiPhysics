@@ -170,16 +170,6 @@ protected:
     /// @return Map of array names to array data
     StringArrayMap read_data_from_vtp_file(const std::string& vtp_file_path, const std::vector<std::string>& array_names);
 
-    /// @brief Find index of a point in the VTP points array
-    /// @param x X coordinate
-    /// @param y Y coordinate
-    /// @param z Z coordinate
-    /// @param vtp_points VTP points array
-    /// @param mesh_scale_factor Scale factor applied to mesh coordinates
-    /// @return Index of the matching point in the VTP array
-    /// @throws std::runtime_error if no matching point is found
-    int find_vtp_point_index(double x, double y, double z, const Array<double>& vtp_points, double mesh_scale_factor) const;
-
     /// @brief Hook for derived classes to validate array values
     /// @param array_name Name of the array being validated
     /// @param value Value to validate

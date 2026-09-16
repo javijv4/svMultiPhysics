@@ -25,6 +25,7 @@
 #include "ActiveStress.h"
 
 #include "DebugMsg.h"
+#include "PointLocator.h"
 
 #include "consts.h"
 
@@ -1586,6 +1587,18 @@ class urisType
 
     /// @brief Flag indicating whether the scaffold mesh UDF is computed.
     bool scaffold_udf_computed = false;
+
+    /// @brief Mesh index for each merged face element (maps locator index → face).
+    Vector<int> face_mesh_ids;
+
+    /// @brief Local element index for each merged face element (maps locator index → Ec).
+    Vector<int> face_elem_ids;
+
+    /// @brief Point locator over valve face centroids (points refreshed with x).
+    svmp::PointLocator face_locator;
+
+    /// @brief Point locator over the fixed scaffold mesh (set when scaffold_flag).
+    svmp::PointLocator scaffold_locator;
 
 };
 

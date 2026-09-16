@@ -21,6 +21,7 @@
 #include "post.h"
 #include "set_bc.h"
 #include "txt.h"
+#include "uris.h"
 #include "utils.h"
 #include "vtk_xml.h"
 
@@ -930,6 +931,7 @@ void initialize(Simulation* simulation, Vector<double>& timeP)
         uris_obj.valve_velocity_fluid.resize(nsd, com_mod.tnNo);
         uris_obj.valve_velocity_fluid = 0.0;
       }
+      uris::uris_init_locators(uris_obj);
     }
   }
 

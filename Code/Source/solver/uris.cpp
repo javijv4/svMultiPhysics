@@ -8,6 +8,7 @@
 #include "lhsa.h"
 #include "mat_fun.h"
 #include "nn.h"
+#include "PointLocator.h"
 #include "utils.h"
 #include "set_bc.h"
 
@@ -17,11 +18,12 @@
 #include "VtkData.h"
 
 #include <numbers>
+#include <stdexcept>
 
 namespace uris { 
 
-void find_closest_element_centroid(const mshType& mesh, const Vector<double>& xp,
-                                   double& minS, int& element_index, Vector<double>& xb);
+void find_closest_element_centroid(const svmp::PointLocator& locator, const Vector<double>& xp,
+                                   double& distance, int& element_index, Vector<double>& xb);
 
 /// @brief This subroutine computes the mean pressure and flux on the 
 /// immersed surface 
@@ -1165,6 +1167,41 @@ void uris_write_vtus(ComMod& com_mod) {
 
 }
 
+/// @brief Build face/scaffold PointLocators and face-index maps (once, after distribute).
+void uris_init_locators(urisType& uris_obj) {
+  int number_of_elements = 0;
+  const int eNoN = uris_obj.msh[0].eNoN;
+  for (int iM = 0; iM < uris_obj.nFa; iM++) {
+    if (uris_obj.msh[iM].eNoN != eNoN) {
+      throw std::runtime_error(
+          "URIS face meshes must share the same number of nodes per element.");
+    }
+    number_of_elements += uris_obj.msh[iM].nEl;
+  }
+
+  Array<int> face_connectivity(eNoN, number_of_elements);
+  uris_obj.face_mesh_ids = Vector<int>(number_of_elements);
+  uris_obj.face_elem_ids = Vector<int>(number_of_elements);
+  int element_index = 0;
+  for (int iM = 0; iM < uris_obj.nFa; iM++) {
+    const auto& mesh = uris_obj.msh[iM];
+    for (int e = 0; e < mesh.nEl; e++) {
+      for (int a = 0; a < eNoN; a++) {
+        face_connectivity(a, element_index) = mesh.IEN(a, e);
+      }
+      uris_obj.face_mesh_ids(element_index) = iM;
+      uris_obj.face_elem_ids(element_index) = e;
+      element_index++;
+    }
+  }
+  uris_obj.face_locator = svmp::PointLocator(uris_obj.x, face_connectivity);
+
+  if (uris_obj.scaffold_flag) {
+    uris_obj.scaffold_locator =
+        svmp::PointLocator(uris_obj.scaffold_msh.x, uris_obj.scaffold_msh.IEN);
+  }
+}
+
 /// @brief  Checks if a probe lies inside or outside an immersed boundary
 void uris_calc_sdf(ComMod& com_mod) {
   #define n_debug_uris_calc_sdf 
@@ -1235,6 +1272,10 @@ void uris_calc_sdf(ComMod& com_mod) {
       uris_compute_expanded_bbox(scaffold_mesh.x, nsd, bbox_expansion, minb_scaf, maxb_scaf);
     }
 
+    if (compute_valve_sdf) {
+      uris_obj.face_locator.update_points(uris_obj.x);
+    }
+
     // The SDF is computed on the reference configuration, which
     // means that the valves will be morphed based on the fluid mesh
     // motion. If the fluid mesh stretches near the valve, the valve
@@ -1248,16 +1289,17 @@ void uris_calc_sdf(ComMod& com_mod) {
       }
 
       if (compute_valve_sdf && uris_point_in_bbox(xp, minb, maxb, nsd)) {
-        double minS = std::numeric_limits<double>::max();
+        double distance = 0.0;
         int Ec = -1;
         int jM = -1;
         Vector<double> xb(nsd);
         Vector<double> unitNormal(nsd);
-        uris_find_closest_face_centroid(uris_obj, xp, nsd, minS, Ec, jM, xb);
+        uris_find_closest_face_centroid(uris_obj.face_locator, uris_obj.face_mesh_ids,
+                                        uris_obj.face_elem_ids, xp, distance, Ec, jM, xb);
         uris_face_unit_normal(uris_obj, nsd, jM, Ec, unitNormal);
         const double dotp = (xp - xb) * unitNormal;
         const double sdf_sign = uris_compute_sdf_sign(uris_obj, xp, xb, dotp);
-        uris_obj.sdf[ca] = sdf_sign * minS;
+        uris_obj.sdf[ca] = sdf_sign * distance;
 
         if (uris_obj.include_uris_velocity) {
           Vector<double> interp_valve_vel(nsd);
@@ -1267,11 +1309,11 @@ void uris_calc_sdf(ComMod& com_mod) {
       }
 
       if (compute_scaffold_udf && uris_point_in_bbox(xp, minb_scaf, maxb_scaf, nsd)) {
-        double minS_scaf = std::numeric_limits<double>::max();
+        double distance = 0.0;
         int Ec = -1;
         Vector<double> xb(nsd);
-        find_closest_element_centroid(scaffold_mesh, xp, minS_scaf, Ec, xb);
-        uris_obj.scaffold_udf[ca] = minS_scaf;
+        find_closest_element_centroid(uris_obj.scaffold_locator, xp, distance, Ec, xb);
+        uris_obj.scaffold_udf[ca] = distance;
       }
     } // ca: loop
 
@@ -1394,32 +1436,21 @@ void surface_element_barycenter(const urisType& uris_obj, int jM, int Ec, Vector
   xb = xb / mesh.eNoN;
 }
 
-/// @brief Barycenter of a fixed shell element using mesh coordinates.
-Vector<double> mesh_element_barycenter(const mshType& mesh, const int element_index) {
-  Vector<double> xb(mesh.x.nrows());
-  xb = 0.0;
-  for (int a = 0; a < mesh.eNoN; a++) {
-    const int Ac = mesh.IEN(a, element_index);
-    xb = xb + mesh.x.rcol(Ac);
-  }
-  xb = xb / mesh.eNoN;
-  return xb;
-}
-
 /// @brief Find the closest URIS shell element centroid to a point.
 ///
-/// @param[in] uris_obj URIS object containing the shell meshes and current
-/// valve coordinates.
+/// @param[in] locator Point locator built from all URIS face meshes.
+/// @param[in] mesh_ids Mesh index for each locator element.
+/// @param[in] elem_ids Local element index for each locator element.
 /// @param[in] xp Background mesh point used to search for the nearest
 /// URIS shell element centroid.
-/// @param[in] nsd Number of spatial dimensions.
-/// @param[in,out] minS Current minimum centroid distance; updated when a
-/// closer centroid is found.
+/// @param[out] distance Distance from @p xp to the nearest shell element centroid.
 /// @param[out] Ec Element index of the closest shell element centroid.
 /// @param[out] jM Mesh index containing the closest shell element centroid.
 /// @param[out] xb Coordinates of the closest shell element centroid.
-void uris_find_closest_face_centroid(const urisType& uris_obj, const Vector<double>& xp,
-                                     const int nsd, double& minS, int& Ec, int& jM,
+void uris_find_closest_face_centroid(const svmp::PointLocator& locator,
+                                     const Vector<int>& mesh_ids,
+                                     const Vector<int>& elem_ids,
+                                     const Vector<double>& xp, double& distance, int& Ec, int& jM,
                                      Vector<double>& xb) {
   #define n_dbg_uris_find_closest_face_centroid
   #ifdef dbg_uris_find_closest_face_centroid
@@ -1428,42 +1459,34 @@ void uris_find_closest_face_centroid(const urisType& uris_obj, const Vector<doub
   dmsg << "finding closest face centroid";
   #endif
 
-  Vector<double> face_centroid(nsd);
-  for (int iM = 0; iM < uris_obj.nFa; iM++) {
-    const auto& mesh = uris_obj.msh[iM];
-    for (int e = 0; e < mesh.nEl; e++) {
-      surface_element_barycenter(uris_obj, iM, e, face_centroid);
-      const double dS = utils::norm((xp - face_centroid));
-      if (dS < minS) {
-        minS = dS;
-        Ec = e;
-        jM = iM;
-        xb = face_centroid;
-      }
-    }
+  const auto nearest = locator.find_nearest_element_centroid(xp);
+  if (!nearest.has_value()) {
+    throw std::runtime_error("URIS face locator returned no nearest element centroid.");
   }
+
+  distance = nearest->distance;
+  Ec = elem_ids(nearest->element_index);
+  jM = mesh_ids(nearest->element_index);
+  xb = nearest->location;
 }
 
 /// @brief Find the closest fixed mesh element centroid to a point.
 ///
-/// @param[in] mesh Mesh containing the elements to search.
+/// @param[in] locator Point locator built from the mesh points and connectivity.
 /// @param[in] xp Background mesh point used to search for the nearest
 /// fixed mesh element centroid.
-/// @param[in,out] minS Current minimum centroid distance; updated when a
-/// closer centroid is found.
+/// @param[out] distance Distance from @p xp to the nearest element centroid.
 /// @param[out] element_index Index of the element with the closest centroid.
 /// @param[out] xb Coordinates of the closest element centroid.
-void find_closest_element_centroid(const mshType& mesh, const Vector<double>& xp,
-                                   double& minS, int& element_index, Vector<double>& xb) {
-  for (int e = 0; e < mesh.nEl; e++) {
-    const Vector<double> elem_centroid = mesh_element_barycenter(mesh, e);
-    const double dS = utils::norm((xp - elem_centroid));
-    if (dS < minS) {
-      minS = dS;
-      element_index = e;
-      xb = elem_centroid;
-    }
+void find_closest_element_centroid(const svmp::PointLocator& locator, const Vector<double>& xp,
+                                   double& distance, int& element_index, Vector<double>& xb) {
+  const auto nearest = locator.find_nearest_element_centroid(xp);
+  if (!nearest.has_value()) {
+    throw std::runtime_error("Scaffold locator returned no nearest element centroid.");
   }
+  distance = nearest->distance;
+  element_index = nearest->element_index;
+  xb = nearest->location;
 }
 
 /// @brief Unit normal of URIS face element (jM, Ec) from parametric tangents 

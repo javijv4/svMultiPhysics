@@ -7,6 +7,7 @@
 #include "ComMod.h"
 #include "SolutionStates.h"
 #include "Simulation.h"
+#include "PointLocator.h"
 
 namespace uris {
 
@@ -26,6 +27,8 @@ void uris_write_vtus(ComMod& com_mod);
 
 void uris_calc_sdf(ComMod& com_mod);
 
+void uris_init_locators(urisType& uris_obj);
+
 void uris_read_sv(Simulation* simulation, mshType& mesh, const URISFaceParameters* mesh_param);
 
 bool in_poly(const Vector<double>& P, const Array<double>& P1, bool include_bdry);
@@ -35,8 +38,11 @@ bool same_side(const Vector<double>& v1, const Vector<double>& v2, const Vector<
 
 void surface_element_barycenter(const urisType& uris_obj, int jM, int Ec, Vector<double>& xb);
 
-void uris_find_closest_face_centroid(const urisType& uris_obj, const Vector<double>& xp,
-  const int nsd, double& minS, int& Ec, int& jM, Vector<double>& xb);
+void uris_find_closest_face_centroid(const svmp::PointLocator& locator,
+                                     const Vector<int>& mesh_ids,
+                                     const Vector<int>& elem_ids,
+                                     const Vector<double>& xp, double& distance, int& Ec, int& jM,
+                                     Vector<double>& xb);
 
 void uris_face_unit_normal(const urisType& uris_obj, const int nsd, const int jM, const int Ec,
   Vector<double>& unitNormal);

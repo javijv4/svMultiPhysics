@@ -4,6 +4,7 @@
 #include "BoundaryCondition.h"
 #include "ComMod.h"
 #include "DebugMsg.h"
+#include "PointLocator.h"
 #include "Vector.h"
 #include <stdexcept>
 #include <iostream>
@@ -357,6 +358,7 @@ void BoundaryCondition::distribute_spatially_variable(const ComMod& com_mod, con
         
         // Get VTP points for position matching
         Array<double> vtp_points = vtp_data_->get_points();
+        const svmp::PointLocator locator(vtp_points);
         
         // Get mesh scale factor from the face's mesh
         double mesh_scale_factor = 1.0; // Default scale factor
@@ -371,8 +373,17 @@ void BoundaryCondition::distribute_spatially_variable(const ComMod& com_mod, con
         for (const auto& array_name : array_names_) {
             all_values[array_name].resize(total_num_nodes);
             for (int i = 0; i < total_num_nodes; i++) {
-                int vtp_idx = find_vtp_point_index(all_positions(0,i), all_positions(1,i), all_positions(2,i), vtp_points, mesh_scale_factor);
-                all_values[array_name](i) = global_data_[array_name](vtp_idx, 0);
+                // Scale down to unscaled VTP coordinates (mesh coords are scaled by mesh_scale_factor)
+                const Vector<double> target_point{
+                    all_positions(0, i) / mesh_scale_factor,
+                    all_positions(1, i) / mesh_scale_factor,
+                    all_positions(2, i) / mesh_scale_factor};
+                const auto match = locator.find_nearest_neighbor(target_point);
+                if (!match.has_value() || match->distance > POINT_MATCH_TOLERANCE) {
+                    throw BoundaryConditionPointNotFoundException(
+                        all_positions(0, i), all_positions(1, i), all_positions(2, i));
+                }
+                all_values[array_name](i) = global_data_[array_name](match->point_index, 0);
             }
         }
         
@@ -463,37 +474,6 @@ void BoundaryCondition::distribute_flags(const CmMod& cm_mod, const cmType& cm, 
             flags_[key] = val;
         }
     }
-}
-
-int BoundaryCondition::find_vtp_point_index(double x, double y, double z,
-                                const Array<double>& vtp_points, double mesh_scale_factor) const
-{
-    const int num_points = vtp_points.ncols();
-    
-    // Scale down the target coordinates to match the unscaled VTP coordinates
-    // The simulation coordinates are scaled by mesh_scale_factor, but VTP coordinates are not
-    Vector<double> target_point{x / mesh_scale_factor, y / mesh_scale_factor, z / mesh_scale_factor};
-
-    // Simple linear search through all points in the VTP file
-    for (int i = 0; i < num_points; i++) {
-        auto vtp_point = vtp_points.col(i);
-        auto diff = vtp_point - target_point;
-        double distance = sqrt(diff.dot(diff));
-
-        if (distance <= POINT_MATCH_TOLERANCE) {
-            #define n_debug_bc_find_vtp_point_index
-            #ifdef debug_bc_find_vtp_point_index
-            DebugMsg dmsg(__func__, 0);
-            dmsg << "Found VTP point index for node at position (" << x << ", " << y << ", " << z << ")" << std::endl;
-            dmsg << "Scaled target position (" << target_point(0) << ", " << target_point(1) << ", " << target_point(2) << ")" << std::endl;
-            dmsg << "VTP point index: " << i << std::endl;
-            #endif
-
-            return i;
-        }
-    }
-
-    throw BoundaryConditionPointNotFoundException(x, y, z);
 }
 
 std::string BoundaryCondition::flags_to_string() const {
