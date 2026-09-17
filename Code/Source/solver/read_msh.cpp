@@ -19,9 +19,11 @@
 
 #include "uris.h"
 
+#include <algorithm>
 #include <functional> 
 #include <limits> 
 #include <math.h> 
+#include <stdexcept>
 
 #include <iostream>
 #include <fstream>
@@ -575,46 +577,6 @@ void check_ien(Simulation* simulation, mshType& mesh)
   }
 }
 
-/// @brief Compute the block ID for the given coordinate.
-//
-int find_blk(const int nsd, const int nBkd, const std::vector<bool>& nFlt, const Vector<double>&xMin, const Vector<double>&dx, const Vector<double>& x)
-{
-  int i = 0;
-  int j = 0;
-  int k = 0;
-  int block_id;
-
-  if (nFlt[0]) {
-    i = static_cast<int>((x[0] - xMin[0]) / dx[0]);
-  }
-
-  if (i == nBkd) {
-    i = nBkd - 1;
-  }
-
-  if (nFlt[1]) {
-    j = static_cast<int>((x[1] - xMin[1]) / dx[1]);
-  }
-
-  if (j == nBkd) {
-    j = nBkd - 1;
-  }
-
-  if (nsd == 3) {
-    if (nFlt[2]) {
-      k = static_cast<int>((x[2] - xMin[2]) / dx[2]);
-    }
-    if (k == nBkd) {
-      k = nBkd - 1;
-    }
-    block_id = k + (j + i*nBkd)*nBkd;
-  } else {
-    block_id = j + i*nBkd;
-  }
-
-  return block_id;
-}
-
 /// @brief Check and reorder line connectivity if needed.
 ///
 /// \todo [NOTE] Not implemented.
@@ -855,68 +817,60 @@ void load_var_ini(Simulation* simulation, ComMod& com_mod)
 }
 
 //-------------
-// match_faces
-//-------------
-// Match isoparameteric faces to each other. 
+// match_face_nodes
+//------------------
+// Match isoparametric faces: nearest-neighbor pairing of local face node indices.
+// Used by Add_projection / Add_RIS_projection (negative tolerance => accept nearest).
 //
-// Project nodes from two adjacent meshes to each other based on a L2 norm.
-// Used by Add_projection, including Purkinje end-nodes projection onto a
-// myocardial face (negative Projection_tolerance => accept nearest neighbor).
-//
-void match_faces(const ComMod& com_mod, const faceType& lFa, const faceType& pFa, const double ptol, utils::stackType& lPrj)
+void match_face_nodes(const ComMod& com_mod, const faceType& lFa, const faceType& pFa,
+                      const double ptol, Array<int>& map)
 {
-  #define n_debug_match_faces
-  #ifdef debug_match_faces
+  #define n_debug_match_face_nodes
+  #ifdef debug_match_face_nodes
   DebugMsg dmsg(__func__, com_mod.cm.idcm());
   dmsg.banner();
   dmsg << "lFa.name: " << lFa.name;
   dmsg << "pFa.name: " << pFa.name;
   #endif
 
-  int iM  = lFa.iM;
+  int iM = lFa.iM;
   int iSh = 0;
   for (int i = 0; i < iM; i++) {
     iSh = iSh + com_mod.msh[i].gnNo;
   }
 
-  int jM  = pFa.iM;
+  int jM = pFa.iM;
   int jSh = 0;
   for (int j = 0; j < jM; j++) {
     jSh = jSh + com_mod.msh[j].gnNo;
   }
 
-  #ifdef debug_match_faces
-  dmsg << "iM: " << iM;
-  dmsg << "iSh: " << iSh;
-  dmsg << "jM: " << jM;
-  dmsg << "jSh: " << jSh;
-  #endif
-
   double tol;
-  double eps = std::numeric_limits<double>::epsilon();
-
+  const double eps = std::numeric_limits<double>::epsilon();
   if (utils::is_zero(ptol)) {
     tol = 1.e3 * eps;
-  } else { 
+  } else {
     tol = ptol;
   }
 
   const int nsd = com_mod.nsd;
 
-  // Build the target-face point cloud and query it with PointLocator.
   Array<double> target_points(nsd, pFa.nNo);
   for (int b = 0; b < pFa.nNo; b++) {
     target_points.set_col(b, com_mod.x.col(pFa.gN[b] + jSh));
   }
   const svmp::PointLocator locator(target_points);
 
-  int cnt = 0;
+  if (map.nrows() < 2 || map.ncols() < lFa.nNo) {
+    const int ncols = std::max(map.ncols(), lFa.nNo);
+    map.resize(2, ncols);
+  }
 
+  int cnt = 0;
   for (int a = 0; a < lFa.nNo; a++) {
     const int Ac = lFa.gN[a];
     const Vector<double> query = com_mod.x.col(Ac + iSh);
 
-    // Same-mesh projections must not map a node onto itself.
     std::optional<int> exclude_index;
     if (iM == jM) {
       for (int b = 0; b < pFa.nNo; b++) {
@@ -932,36 +886,20 @@ void match_faces(const ComMod& com_mod, const faceType& lFa, const faceType& pFa
       throw std::runtime_error("Failed to find a nearest neighbor on face " + pFa.name + ".");
     }
 
-    const double minS = nearest->distance;
     const int Bc = pFa.gN[nearest->point_index];
-
-    if (tol < 0.0) {
-      push_stack(lPrj, {Ac, Bc});
-      cnt = cnt + 1;
-    } else if (minS < tol) {
-      push_stack(lPrj, {Ac, Bc});
+    const bool accept = tol < 0.0 || nearest->distance < tol;
+    if (accept) {
+      map(0, a) = Ac;
+      map(1, a) = Bc;
       cnt = cnt + 1;
     }
   }
 
-  #ifdef debug_match_faces
-  dmsg << "cnt: " << cnt;
-  dmsg << "lFa.nNo: " << lFa.nNo;
-  #endif
-
   if (cnt != lFa.nNo) {
-    throw std::runtime_error("Failed to find matching nodes between faces " + lFa.name + " and " + pFa.name + ".");
+    throw std::runtime_error("Failed to find matching nodes between faces " + lFa.name + " and " +
+                             pFa.name + ".");
   }
-
-  if (lPrj.n == 0) {
-    throw std::runtime_error("No matching nodes between faces " + lFa.name + " and " + pFa.name + ".");
-  }
-
-  if (lPrj.n/2 != lFa.nNo) {
-    throw std::runtime_error("Mismatch of nodes between faces " + lFa.name + " and " + pFa.name + ".");
-  }
-
-} 
+}
 
 /// @brief Read fiber direction from a vtu file.
 ///
@@ -1650,7 +1588,6 @@ void set_ris_projector(Simulation* simulation)
     nStk = nStk + com_mod.msh[iM].fa[iFa].nNo;
   }
   std::vector<utils::stackType> stk(nStk);
-  utils::stackType lPrj;
   #ifdef debug_set_ris_projector
   dmsg << "nStk: " << nStk;
   #endif
@@ -1688,8 +1625,8 @@ void set_ris_projector(Simulation* simulation)
     com_mod.msh[jM].res = res;
     RIS.Res(iProj) = res;
 
-    match_nodes(com_mod, com_mod.msh[iM].fa[iFa], com_mod.msh[jM].fa[jFa],
-                com_mod.msh[jM].tol, nStk, com_mod.risMapList[iProj].map);
+    match_face_nodes(com_mod, com_mod.msh[iM].fa[iFa], com_mod.msh[jM].fa[jFa],
+                     com_mod.msh[jM].tol, com_mod.risMapList[iProj].map);
 
     RIS.lst(0,0,iProj) = iM;
     RIS.lst(1,0,iProj) = jM;
@@ -1748,196 +1685,6 @@ void set_ris_projector(Simulation* simulation)
       }
     }
   }
-}
-
-void match_nodes(const ComMod& com_mod, const faceType& lFa, const faceType& pFa, 
-                 const double ptol, const int nNds, Array<int>& map) 
-{
-  #define n_debug_match_nodes
-  #ifdef debug_match_nodes
-  DebugMsg dmsg(__func__, com_mod.cm.idcm());
-  dmsg.banner();
-  dmsg << "lFa.name: " << lFa.name;
-  dmsg << "pFa.name: " << pFa.name;
-  #endif
-
-  int iM = lFa.iM;
-  int iSh = 0;
-  for (int i = 0; i < iM; i++) {
-    iSh = iSh + com_mod.msh[i].gnNo;
-  }
-
-  int jM = pFa.iM;
-  int jSh = 0;
-  for (int j = 0; j < jM; j++) {
-    jSh = jSh + com_mod.msh[j].gnNo;
-  }
-  #ifdef debug_match_nodes
-  dmsg << "iM: " << iM;
-  dmsg << "iSh: " << iSh;
-  dmsg << "jM: " << jM;
-  dmsg << "jSh: " << jSh;
-  #endif
-
-  // std::cout << " mesh iM " << iM << " nbr nodes " << com_mod.msh[iM].gnNo << std::endl;
-  // std::cout << " mesh iM " << iM << " nodes start at tot nbr " << iSh << std::endl;
-  // std::cout << " mesh jM " << jM << " nbr nodes " << com_mod.msh[jM].gnNo << std::endl;
-  // std::cout << " mesh jM " << jM << " nodes start at tot nbr " << jSh << std::endl;
-
-  double tol;
-  double eps = std::numeric_limits<double>::epsilon();
-
-  if (utils::is_zero(ptol)) {
-    tol = 1.e3 * eps;
-  } else { 
-    tol = ptol;
-  }
-
-  // We want to have approximately 1000 nodes in each block. So we
-  // calculate nBkd, which is the number of separate blockes in each
-  // direction, based on that.
-  //
-  int a = pFa.nNo;
-  int nBkd = static_cast<int>( pow(a/1000.0, 0.333) + 0.5) ;
-  if (nBkd == 0) {
-    nBkd = 1;
-  }
-  int nsd = com_mod.nsd;
-  int nBk = pow(nBkd, nsd);
-  #ifdef debug_match_faces
-  dmsg << "a: " << a;
-  dmsg << "nBkd: " << nBkd;
-  dmsg << "nBk: " << nBk;
-  #endif
-
-  Vector<int> nodeBlk(a); 
-  std::vector<blkType> blk(nBk);
-
-  // Find the extents of the domain and size of each block.
-  //
-  auto lfa_nodes = lFa.gN + iSh;
-  auto pfa_nodes = pFa.gN + jSh;
-  Vector<double> xMin(com_mod.nsd), xMax(com_mod.nsd);
-
-  for (int i = 0; i < nsd; i++) {
-    auto lfa_coords = com_mod.x.rows(i, lfa_nodes);
-    auto pfa_coords = com_mod.x.rows(i, pfa_nodes);
-    xMin[i] = std::min(lfa_coords.min(), pfa_coords.min());
-    xMax[i] = std::max(lfa_coords.max(), pfa_coords.max());
-
-    if (xMin[i] < 0.0) {
-      xMin[i] = xMin[i]*(1.0+eps);
-    } else { 
-      xMin[i] = xMin[i]*(1.0-eps);
-    } 
-
-    if (xMax[i] < 0.0) { 
-      xMax[i] = xMax[i]*(1.0-eps);
-    } else { 
-      xMax[i] = xMax[i]*(1.0+eps);
-    } 
-  }
-
-  auto dx = (xMax - xMin) / static_cast<double>(nBkd);
-  std::vector<bool> nFlt(nsd);
-
-  for (int i = 0; i < nsd; i++) {
-    if (utils::is_zero(dx[i])) {
-      nFlt[i] = false;
-    } else {
-      nFlt[i] = true;
-    } 
-  }
-
-  // std::cout << " xMax " << xMax << std::endl;
-  // std::cout << " xMin " << xMin << std::endl;
-  // std::cout << " dx " << dx << std::endl;
-
-  // Find an estimation for size of each block
-  //
-  for (int a = 0; a < pFa.nNo; a++) {
-    int Ac  = pFa.gN[a] + jSh;
-    auto coord = com_mod.x.col(Ac);
-    int iBk = find_blk(nsd, nBkd, nFlt, xMin, dx, coord);
-    nodeBlk[a] = iBk;
-    blk[iBk].n = blk[iBk].n + 1;
-  }
-
-  for (int iBk = 0; iBk < nBk; iBk++) {
-    blk[iBk].gN = Vector<int>(blk[iBk].n);
-    blk[iBk].n = 0;
-  }
-
-  for (int a = 0; a < pFa.nNo; a++) {
-    int Ac = pFa.gN[a];
-    int iBk = nodeBlk[a];
-    blk[iBk].gN(blk[iBk].n) = Ac;
-    blk[iBk].n = blk[iBk].n + 1;
-  } 
-
-  // Doing the calculation for every single node on this face.
-  //
-  int cnt  = 0;
-
-  for (int a = 0; a < lFa.nNo; a++) {
-    int Ac  = lFa.gN[a];
-    auto coord = com_mod.x.col(Ac+iSh);
-    int iBk = find_blk(nsd, nBkd, nFlt, xMin, dx, coord);
-
-    // Check all nodes on the other face.
-    auto minS = std::numeric_limits<double>::max();
-    int i;
-    for (int b = 0; b < blk[iBk].n; b++) {
-      int Bc = blk[iBk].gN[b];
-      if ((iM == jM) && (Ac == Bc)) {
-        continue;
-      }
-
-      auto diff = com_mod.x.col(Bc+jSh) - com_mod.x.col(Ac+iSh);
-      double ds = sqrt(diff*diff); 
-
-      if (ds < minS) { 
-        minS = ds;
-        i = Bc;
-      }
-    }
-
-    int Bc = i;
-
-    if (tol < 0.0) {
-      // std::cout << "adding connection (/Ac,Bc/)) = (" << Ac << ", " << Bc << ")" << std::endl;
-      map(0,cnt) = Ac;
-      map(1,cnt) = Bc;
-      cnt = cnt + 1;
-    } else if (minS < tol) {
-      // std::cout << "adding connection (/Ac,Bc/)) = (" << Ac << ", " << Bc << ")" << std::endl;
-      map(0,cnt) = Ac;
-      map(1,cnt) = Bc;
-      cnt = cnt + 1;
-    }
-  }
-
-  #ifdef debug_match_faces
-  dmsg << "cnt: " << cnt;
-  dmsg << "lFa.nNo: " << lFa.nNo;
-  #endif
-
-  if (cnt != lFa.nNo) {
-    throw std::runtime_error("Failed to find matching nodes between faces " + lFa.name + " and " + pFa.name + ".");
-  }
-
-  std::cout << " Finally the map0 is: " << std::endl;
-  Vector<int> map0 = map.row(0);
-  for (int i = 0; i < map0.size(); i++) {
-        std::cout << map(0,i) << "    " << "\t";
-    }
-  std::cout << std::endl;
-  std::cout << " Finally the map1 is: " << std::endl;
-  Vector<int> map1 = map.row(1);
-  for (int i = 0; i < map1.size(); i++) {
-        std::cout << map(1,i) << "    " << "\t";
-    }
-  std::cout << std::endl;
 }
 
 void set_uris_meshes(Simulation* simulation)
@@ -2081,7 +1828,7 @@ void set_projector(Simulation* simulation, utils::stackType& avNds)
     nStk = nStk + com_mod.msh[iM].fa[iFa].nNo;
   }
   std::vector<utils::stackType> stk(nStk);
-  utils::stackType lPrj;
+  Array<int> face_map;
   #ifdef debug_set_projector
   dmsg << "nStk: " << nStk;
   #endif
@@ -2111,22 +1858,15 @@ void set_projector(Simulation* simulation, utils::stackType& avNds)
 
     double tol = params->projection_tolerance();
 
-    // Match face nodes?
-    match_faces(com_mod, face1, face2, tol, lPrj);
+    match_face_nodes(com_mod, face1, face2, tol, face_map);
 
-    while (true) {
-      int ia, ja, i, j, k;
-
-      if (!utils::pull_stack(lPrj,ja)) {
-        break;
-      }
-
-      if (!utils::pull_stack(lPrj,ia)) {
-        break;
-      }
+    for (int pair = 0; pair < face1.nNo; pair++) {
+      const int ia = face_map(0, pair);
+      const int ja_face = face_map(1, pair);
+      int i, j, k;
 
       i = com_mod.msh[iM].gN[ia];
-      j = com_mod.msh[jM].gN[ja];
+      j = com_mod.msh[jM].gN[ja_face];
 
       if (i == -1) {
         if (j == -1) {
@@ -2136,9 +1876,9 @@ void set_projector(Simulation* simulation, utils::stackType& avNds)
             com_mod.gtnNo = com_mod.gtnNo + 1;
           }
           com_mod.msh[iM].gN[ia] = k;
-          com_mod.msh[jM].gN[ja] = k;
+          com_mod.msh[jM].gN[ja_face] = k;
 
-          push_stack(stk[k], {iM,ia,jM,ja});
+          push_stack(stk[k], {iM, ia, jM, ja_face});
 
         // This is the case one of them has already been assigned. So just using that value for the other one
         } else { 
@@ -2147,8 +1887,8 @@ void set_projector(Simulation* simulation, utils::stackType& avNds)
         }
       } else { 
         if (j == -1) {
-          com_mod.msh[jM].gN[ja] = i;
-          push_stack(stk[i], {jM,ja});
+          com_mod.msh[jM].gN[ja_face] = i;
+          push_stack(stk[i], {jM, ja_face});
 
         // Since they are both already have assigned values, I will move the
         // nodes from stack with bigger ID, j, to the other stack, i.
@@ -2163,14 +1903,15 @@ void set_projector(Simulation* simulation, utils::stackType& avNds)
           } 
           while (true) {
             int kM;
-            if (!utils::pull_stack(stk[j],ja)) {
+            int ja;
+            if (!utils::pull_stack(stk[j], ja)) {
               break; 
             }
-            if (!utils::pull_stack(stk[j],kM)) { 
+            if (!utils::pull_stack(stk[j], kM)) { 
               break; 
             }
             com_mod.msh[kM].gN[ja] = i;
-            push_stack(stk[i], {kM,ja});
+            push_stack(stk[i], {kM, ja});
           } 
           utils::push_stack(avNds, j);
         } 

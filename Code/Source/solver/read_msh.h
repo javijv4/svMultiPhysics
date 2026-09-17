@@ -15,13 +15,6 @@
 
 namespace read_msh_ns {
 
-  class blkType
-  {
-    public:
-      int n = 0;
-      Vector<int> gN;
-  };
-
   void calc_elem_ar(ComMod& com_mod, const CmMod& cm_mod, mshType& lM, bool& rflag, const SolutionStates& solutions);
   void calc_elem_jac(ComMod& com_mod, const CmMod& cm_mod, mshType& lM, bool& rflag, const SolutionStates& solutions);
   void calc_elem_skew(ComMod& com_mod, const CmMod& cm_mod, mshType& lM, bool& rflag, const SolutionStates& solutions);
@@ -41,13 +34,14 @@ namespace read_msh_ns {
   void check_tri6_conn(mshType& mesh);
   void check_wedge_conn(mshType& mesh);
 
-  int find_blk(const int nsd, const int nBkd, const std::vector<bool>& nFlt, const Vector<double>&xMin, const Vector<double>&dx, const Vector<double>& x);
-
   void load_var_ini(Simulation* simulation, const ComMod& com_mod);
 
-  void match_faces(const ComMod& com_mod, const faceType& face1, const faceType& face2, const double tol, utils::stackType& lPrj);
-  void match_nodes(const ComMod& com_mod, const faceType& lFa, const faceType& pFa, 
-                   const double ptol, const int nNds, Array<int>& map);
+  /// @brief Match each node on @p lFa to the nearest node on @p pFa.
+  ///
+  /// Writes local face node indices into @p map: row 0 = @p lFa, row 1 = @p pFa.
+  /// If @p map has fewer than two rows or fewer columns than @p lFa.nNo, it is resized.
+  void match_face_nodes(const ComMod& com_mod, const faceType& lFa, const faceType& pFa,
+                        const double ptol, Array<int>& map);
 
   void read_fib_nff(Simulation* simulation, mshType& mesh, const std::string& fName, const std::string& kwrd, const int idx);
   void read_msh(Simulation* simulation);

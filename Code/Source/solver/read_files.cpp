@@ -11,6 +11,7 @@
 #include "all_fun.h"
 #include "consts.h"
 #include "IonicModel.h"
+#include "PointLocator.h"
 #include "read_msh.h"
 #include "vtk_xml.h"
 
@@ -23,8 +24,8 @@
 
 #include <fstream>
 #include <functional>
-#include <math.h>
 #include <sstream>
+#include <stdexcept>
 #include <vector>
 
 namespace read_files_ns {
@@ -34,89 +35,21 @@ namespace read_files_ns {
 //#include "set_output_props.h"
 #include "set_viscosity_props.h"
 
-/// @brief Match two faces?
+/// @brief Match nodes on @p lFa to nearest nodes on @p gFa.
 ///
 /// \todo [TODO:DaveP] this has not been tested.
 //
 void face_match(ComMod& com_mod, faceType& lFa, faceType& gFa, Vector<int>& ptr)
 {
-  using namespace read_msh_ns;
-  int nsd = com_mod.nsd;
-  int nBlkd = round(pow(static_cast<double>(gFa.nNo)/1000.0, 0.333));
-  if (nBlkd == 0) {
-    nBlkd = 1;
-  }
-
-  int nBlk = pow(nBlkd, nsd);
-  Vector<double> xMin(nsd), xMax(nsd); 
-  double eps = std::numeric_limits<double>::epsilon();
-
-  for (int i = 0;  i < nsd; i++) {
-    xMin[i] = std::min(lFa.x.min(), gFa.x.min());
-    xMax[i] = std::max(lFa.x.max(), gFa.x.max());
-
-    if (xMin[i] <  0.0) {
-      xMin[i] = xMin[i] * (1.0 + eps);
-    } else { 
-      xMin[i] = xMin[i] * (1.0 - eps);
-    }
-
-    if (xMax[i] < 0.0) {
-      xMax[i] = xMax[i] * (1.0 - eps);
-    } else { 
-       xMax[i] = xMax[i] * (1.0 + eps);
-    }
-  }
-
-  auto dx = (xMax - xMin) / static_cast<double>(nBlkd);
-  std::vector<bool> nFlt = {true, true, true};
-
-  for (int i = 0; i < nsd; i++) { 
-     if (utils::is_zero(dx[i])) {
-       nFlt[i] = false;
-     }
-  }
-
-  std::vector<blkType> blk(nBlk);
-  std::vector<int> nodeBlk(gFa.nNo); 
-
-  for (int a = 0; a < gFa.nNo; a++) {
-    auto coord = gFa.x.col(a);
-    int iBlk = find_blk(nsd, nBlkd, nFlt, xMin, dx, coord);
-    nodeBlk[a] = iBlk;
-    blk[iBlk].n = blk[iBlk].n + 1;
-  }
-
-  for (int iBlk = 0; iBlk < nBlk; iBlk++) {
-    blk[iBlk].gN = Vector<int>(blk[iBlk].n);
-    blk[iBlk].n = 0;
-  }
-
-  for (int a = 0; a < gFa.nNo; a++) {
-    int iBlk = nodeBlk[a];
-    blk[iBlk].gN[blk[iBlk].n] = a;
-    blk[iBlk].n = blk[iBlk].n + 1;
-  }
+  const svmp::PointLocator locator(gFa.x);
 
   for (int a = 0; a < lFa.nNo; a++) {
-    auto coord = lFa.x.col(a);
-    int iBlk = find_blk(nsd, nBlkd, nFlt, xMin, dx, coord);
-    auto minS = std::numeric_limits<double>::max();
-
-    for (int i = 0;  i < blk[iBlk].n; i++) {
-      int b = blk[iBlk].gN[i];
-      auto diff = lFa.x.col(a) - gFa.x.col(b);
-      double ds = sqrt(diff*diff);
-
-      if (ds < minS) {
-        minS = ds;
-        ptr[a] = b;
-      }
-    }
-
-    if (ptr[a] == -1) { 
-      throw std::runtime_error("[face_match] Failed to find matching nodes between faces '" + lFa.name + "' and '" + gFa.name + "'.");
-    }
+    const auto nearest = locator.find_nearest_neighbor(lFa.x.col(a));
+    svmp::throw_if<svmp::FE::InvalidArgumentException>(
+        !nearest.has_value(),
+        "[face_match] Failed to find matching nodes between faces '" + lFa.name + "' and '" +
+            gFa.name + "'.");
+    ptr[a] = nearest->point_index;
   }
 }
 

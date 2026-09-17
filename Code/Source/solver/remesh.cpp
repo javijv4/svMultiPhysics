@@ -7,6 +7,7 @@
 #include "mat_fun.h"
 #include "nn.h"
 #include "output.h"
+#include "PointLocator.h"
 #include "read_msh.h"
 #include "remeshTet.h"
 #include "vtk_xml.h"
@@ -15,6 +16,7 @@
 #include<iostream>
 #include <filesystem>
 #include<fstream>
+#include <stdexcept>
 
 namespace remesh {
 
@@ -210,7 +212,18 @@ void distrn(ComMod& com_mod, CmMod& cm_mod, const int iM, mshType& lM, Array<dou
   // lM.x are remeshed nodes (size 3 x gnNo).
   //
   // x are original nodes (size 3 x msh(iM).nNo).
-  // 
+  //
+  // Build displaced original-mesh coordinates once; tolerance passes reuse the locator.
+  const int local_nNo = com_mod.msh[iM].nNo;
+  Array<double> displaced_points(nsd, local_nNo);
+  for (int b = 0; b < local_nNo; b++) {
+    const int Ac = com_mod.msh[iM].gN(b);
+    for (int i = 0; i < nsd; i++) {
+      displaced_points(i, b) = com_mod.x(i, Ac) + Dg(i, Ac);
+    }
+  }
+  svmp::PointLocator locator(displaced_points);
+
   while (true) {
     part = 0;
     tmpI = 0;
@@ -226,23 +239,13 @@ void distrn(ComMod& com_mod, CmMod& cm_mod, const int iM, mshType& lM, Array<dou
       if (part(a) != 0) {
         continue; 
       }
-      double minS = std::numeric_limits<double>::max();
 
-      for (int b = 0; b < com_mod.msh[iM].nNo; b++) {
-        int Ac = com_mod.msh[iM].gN(b);
-        double dS = 0.0;
-
-        for (int i = 0; i < nsd; i++) {
-          double diff = com_mod.x(i,Ac) + Dg(i,Ac) - lM.x(i,a);
-          dS += diff * diff;
-        }
-        dS = sqrt(dS);
-        //dS = SQRT(SUM((x(:,Ac)+Dg(:,Ac)-lM.x(:,a))**2._RKIND))
-
-        if (minS > dS) minS = dS;
+      const auto nearest = locator.find_nearest_neighbor(lM.x.col(a));
+      if (!nearest.has_value()) {
+        throw std::runtime_error("[distrn] Failed to find a nearest original-mesh node.");
       }
 
-      if (minS < tol) {
+      if (nearest->distance < tol) {
         nNo = nNo + 1;
         part(a) = cm.tF(cm_mod);
       }
@@ -1023,50 +1026,55 @@ void interp(ComMod& com_mod, CmMod& cm_mod, const int lDof, const int iM, mshTyp
     }
   }
 
-  // Since there is no direct mapping for face data, we use L2 norm
-  // to find the nearest face node and copy its solution. This requires
-  // face node/IEN structure to NOT be changed during remeshing.
+  // No direct mapping for face data: match target surface nodes to displaced
+  // source face nodes (face node/IEN structure must be unchanged during remesh).
   //
   tmpL.resize(nNo);
-  bool flag = false; 
+  constexpr double face_node_match_tol = 1.E-12;
 
-  for (int a = 0; a < nNo; a++) {
-    int Ac = gN(a);
+  int nFacePts = 0;
+  for (int iFa = 0; iFa < msh[iM].nFa; iFa++) {
+    nFacePts += msh[iM].fa[iFa].nNo;
+  }
 
-    if (srfNds(a) != 0) {      // srfNds is a bool (1|0) vector.
-      flag = false; 
-
-      for (int iFa = 0; iFa < msh[iM].nFa; iFa++) {
-        auto& fa = msh[iM].fa[iFa];
-
-        for (int b = 0; b <fa.nNo; b++) {
-          int Bc = fa.gN(b);
-          double dS = 0.0; 
-
-          for (int i = 0; i < nsd; i++) {
-            double sum = com_mod.x(i,Bc) + Dg(i,Bc) - tMsh.x(i,Ac);
-            dS += sum * sum;
-          }
-
-          dS = sqrt(dS);
-
-          if (dS < 1.E-12) {
-            tmpL(a) = Bc;
-            flag = true;
-            break;
-          }
+  if (nFacePts > 0) {
+    Array<double> face_points(nsd, nFacePts);
+    Vector<int> face_node_gN(nFacePts);
+    int face_pt = 0;
+    for (int iFa = 0; iFa < msh[iM].nFa; iFa++) {
+      const auto& fa = msh[iM].fa[iFa];
+      for (int b = 0; b < fa.nNo; b++) {
+        const int Bc = fa.gN(b);
+        face_node_gN(face_pt) = Bc;
+        for (int i = 0; i < nsd; i++) {
+          face_points(i, face_pt) = com_mod.x(i, Bc) + Dg(i, Bc);
         }
-
-        if (flag) break;
+        face_pt += 1;
       }
+    }
 
-      if (flag) {
-        int Bc = msh[iM].lN(tmpL(a));
-        for (int i = 0; i < tmpX.nrows(); i++) { 
-          tmpX(i,a) = sD(i,Bc);
+    const svmp::PointLocator face_locator(face_points);
+
+    for (int a = 0; a < nNo; a++) {
+      if (srfNds(a) == 0) {      // srfNds is a bool (1|0) vector.
+        continue;
+      }
+      const int Ac = gN(a);
+      const auto nearest = face_locator.find_nearest_neighbor(tMsh.x.col(Ac));
+      if (nearest.has_value() && nearest->distance < face_node_match_tol) {
+        tmpL(a) = face_node_gN(nearest->index);
+        const int Bc = msh[iM].lN(tmpL(a));
+        for (int i = 0; i < tmpX.nrows(); i++) {
+          tmpX(i, a) = sD(i, Bc);
         }
-      } else { 
+      } else {
         tagNd(Ac) = 0;
+      }
+    }
+  } else {
+    for (int a = 0; a < nNo; a++) {
+      if (srfNds(a) != 0) {
+        tagNd(gN(a)) = 0;
       }
     }
   }
