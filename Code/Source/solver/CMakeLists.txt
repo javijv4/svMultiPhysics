@@ -215,6 +215,7 @@ set(CSRCS
   darcy.h darcy.cpp
   distribute.h distribute.cpp
   eq_assem.h eq_assem.cpp
+  fiber_loader.h fiber_loader.cpp
   fluid.h fluid.cpp
   fsi.h fsi.cpp
   fs.h fs.cpp

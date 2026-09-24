@@ -2272,8 +2272,10 @@ void part_msh(Simulation* simulation, int iM, mshType& lM, Vector<int>& gmtl, in
 
   Array<int> tempIEN;
   Array<double> tmpFn;
+  Array3<double> tmpFnQ;
   flag = false;
   bool fnFlag = false;
+  bool fnQFlag = false;
 
   #ifdef dbg_part_msh
   dmsg << "sCount: " << sCount;
@@ -2370,6 +2372,17 @@ void part_msh(Simulation* simulation, int iM, mshType& lM, Vector<int>& gmtl, in
       lM.fN.clear();
     }
 
+    // Reorder quadrature-point fibers using the same element permutation.
+    if (lM.fN_q.size() != 0) {
+      fnQFlag = true;
+      tmpFnQ.resize(nFn*nsd, lM.nG, lM.gnEl);
+      for (int e = 0; e < lM.gnEl; e++) {
+        const int Ec = lM.otnIEN[e];
+        tmpFnQ.set_slice(Ec, lM.fN_q.slice(e));
+      }
+      lM.fN_q.clear();
+    }
+
   } else { 
     lM.otnIEN.clear();
   }
@@ -2378,6 +2391,7 @@ void part_msh(Simulation* simulation, int iM, mshType& lM, Vector<int>& gmtl, in
 
   cm.bcast(cm_mod, &flag);
   cm.bcast(cm_mod, &fnFlag);
+  cm.bcast(cm_mod, &fnQFlag);
   cm.bcast(cm_mod, lM.eDist);
   if (com_mod.risFlag) {
     cm.bcast(cm_mod, lM.partRIS);
@@ -2431,6 +2445,20 @@ void part_msh(Simulation* simulation, int iM, mshType& lM, Vector<int>& gmtl, in
     MPI_Scatterv(tmpFn.data(), sCount.data(), disp.data(), cm_mod::mpreal, lM.fN.data(), nEl*nFn*nsd, 
         cm_mod::mpreal, cm_mod.master, cm.com());
     tmpFn.clear();
+  }
+
+  // Communicate quadrature-point fibers, if allocated.
+  if (fnQFlag) {
+    const int values_per_element = nFn * nsd * lM.nG;
+    lM.fN_q.resize(nFn*nsd, lM.nG, nEl);
+    for (int i = 0; i < num_proc; i++) {
+      disp[i] = lM.eDist[i] * values_per_element;
+      sCount[i] = (lM.eDist[i+1] - lM.eDist[i]) * values_per_element;
+    }
+    MPI_Scatterv(tmpFnQ.data(), sCount.data(), disp.data(), cm_mod::mpreal,
+                 lM.fN_q.data(), nEl*values_per_element, cm_mod::mpreal,
+                 cm_mod.master, cm.com());
+    tmpFnQ.clear();
   }
 
   // Now scattering the sorted lM%IEN to all processors.

@@ -1026,8 +1026,16 @@ class mshType
     Array<double> nV;
 
     /// @brief Fiber orientations stored at the element level - used for
-    /// electrophysiology and solid mechanics
+    /// electrophysiology and solid mechanics that have not adopted
+    /// quadrature-point fibers.
     Array<double> fN;
+
+    /// @brief Fiber orientations evaluated at the quadrature points.
+    ///
+    /// Shape is (nsd*nFn, nG, nEl). Structural mechanics consumes this field
+    /// directly so both cell- and point-associated input fibers share the same
+    /// representation during element integration.
+    Array3<double> fN_q;
 
     /// @brief Parent shape functions gradient
     /// double Nx(:,:,:)

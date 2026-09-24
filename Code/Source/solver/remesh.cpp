@@ -1861,6 +1861,7 @@ void remesh_restart(Simulation* simulation)
       msh.Nb.clear();
       msh.nV.clear();
       msh.fN.clear();
+      msh.fN_q.clear();
       msh.Nx.clear();
       msh.Nxx.clear();
 

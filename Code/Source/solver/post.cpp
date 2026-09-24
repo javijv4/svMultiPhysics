@@ -589,6 +589,14 @@ void fib_algn_post(Simulation* simulation, const mshType& lM, Array<double>& res
         nn::gnn(eNoN, nsd, nsd, Nxi, xl, Nx, Jac, F);
       }
 
+      if (cPhys == EquationType::phys_struct && lM.fN_q.size() != 0) {
+        for (int iFn = 0; iFn < 2; iFn++) {
+          for (int i = 0; i < nsd; i++) {
+            fN(i,iFn) = lM.fN_q(i + iFn*nsd, g, e);
+          }
+        }
+      }
+
       double w = lM.w(g)*Jac;
       auto F = deformation_gradient(Nx, dl, nsd, eNoN, i);
       for (int iFn = 0; iFn < 2; iFn++) {
@@ -686,6 +694,14 @@ void fib_dir_post(Simulation* simulation, const mshType& lM, const int nFn, Arra
         nn::gnn(eNoN, nsd, nsd, Nxi, xl, Nx, Jac, F);
       }
 
+      if (cPhys == EquationType::phys_struct && lM.fN_q.size() != 0) {
+        for (int iFn = 0; iFn < lM.nFn; iFn++) {
+          for (int l = 0; l < nsd; l++) {
+            fN(l,iFn) = lM.fN_q(l + iFn*nsd, g, e);
+          }
+        }
+      }
+
       double w = lM.w(g) * Jac;
       N = lM.N.col(g);
       F = deformation_gradient(Nx, dl, nsd, eNoN, i);
@@ -774,8 +790,16 @@ void fib_stretch(const ComMod& com_mod, const int iEq, const mshType& lM,
       // Compute Deformation Gradient: F = I + grad(u)
       F = deformation_gradient(Nx, dl, nsd, eNoN, i);
 
-      // Compute fiber stretch based on 4th invariant: I_{4,f} = F.fN.F.fN
-      auto fl = mat_fun::mat_mul(F, lM.fN.rows(0,nsd-1,e));
+      // Compute fiber stretch based on 4th invariant: I_{4,f} = F.fN.F.fN.
+      // Only struct has adopted quadrature-point fibers; other physics retain
+      // the element-level representation.
+      auto fiber = lM.fN.rows(0,nsd-1,e);
+      if (cPhys == EquationType::phys_struct && lM.fN_q.size() != 0) {
+        for (int l = 0; l < nsd; l++) {
+          fiber(l) = lM.fN_q(l, g, e);
+        }
+      }
+      auto fl = mat_fun::mat_mul(F, fiber);
       double lambda = utils::norm(fl);
 
       // L2 projection from integration points to nodes
@@ -1863,6 +1887,15 @@ void tpost(Simulation* simulation, const mshType& lM, const int m, Array<double>
 
       auto Im = mat_fun::mat_id(nsd); 
       auto F = deformation_gradient(Nx, dl, nsd, fs.eNoN, i);
+
+      if (cPhys == EquationType::phys_struct && lM.fN_q.size() != 0 &&
+          lM.fN_q.ncols() == fs.nG) {
+        for (int iFn = 0; iFn < nFn; iFn++) {
+          for (int l = 0; l < nsd; l++) {
+            fN(l,iFn) = lM.fN_q(l + iFn*nsd, g, e);
+          }
+        }
+      }
 
       double detF = mat_fun::mat_det(F, nsd);
 

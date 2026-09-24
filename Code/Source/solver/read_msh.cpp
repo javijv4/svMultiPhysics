@@ -9,12 +9,12 @@
 
 #include "all_fun.h"
 #include "consts.h"
+#include "fiber_loader.h"
 #include "load_msh.h"
 #include "nn.h"
 #include "read_msh.h"
 #include "utils.h"
 #include "vtk_xml.h"
-#include "vtk_xml_parser.h"
 
 #include "uris.h"
 
@@ -1041,9 +1041,9 @@ void match_faces(const ComMod& com_mod, const faceType& lFa, const faceType& pFa
 ///
 /// Reproduces Fortran READFIBNFF.
 //
-void read_fib_nff(Simulation* simulation, mshType& mesh, const std::string& fName, const std::string& kwrd, const int idx)
+bool read_fib_nff(Simulation* simulation, mshType& mesh, const std::string& fName, const std::string& kwrd, const int idx)
 {
-  vtk_xml_parser::load_fiber_direction_vtu(fName, kwrd, idx, simulation->com_mod.nsd, mesh);
+  return fiber_loader::load(fName, kwrd, idx, simulation->com_mod.nsd, mesh);
 }
 
 /// @brief For each mesh defined for the simulation 
@@ -1546,11 +1546,16 @@ void read_msh(Simulation* simulation)
         com_mod.msh[iM].fN = Array<double>(num_paths*nsd, num_elems);
         com_mod.msh[iM].fN = 0.0;
         auto fiber_paths = mesh_param->fiber_direction_file_paths();
+        bool has_interpolated_fibers = false;
 
         // Read fiber directions from vtk format files.
         for (int i = 0; i < com_mod.msh[iM].nFn; i++) {
           auto cTmp = fiber_paths[i];
-          read_fib_nff(simulation, com_mod.msh[iM], cTmp, "FIB_DIR", i);
+          has_interpolated_fibers |=
+              read_fib_nff(simulation, com_mod.msh[iM], cTmp, "FIB_DIR", i);
+        }
+        if (has_interpolated_fibers) {
+          fiber_loader::finalize_interpolated(nsd, com_mod.msh[iM]);
         }
       } else { 
         int num_dirs = mesh_param->fiber_directions.size();

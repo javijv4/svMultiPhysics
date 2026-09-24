@@ -100,7 +100,7 @@ C++ functions are defined within a `namespace` defined for each Fortran file. Fo
              - [<b>match_faces(com_mod, face1, face2, tol, lPrj)</b>](#match_faces) - Process projection faces 
                - [<b>find_blk(nsd, nBkd, nFlt, xMin, dx, coord)</b>](#find_blk) - Compute the block ID for the given coordinate 
            - [<b>read_fib_nff(simulation, com_mod.msh\[iM\], cTmp, "FIB_DIR", i)</b>](#read_fib_nff) - Read fiber orientation
-             - [<b>vtk_xml_parser::load_fiber_direction_vtu(fName, kwrd, idx, simulation->com_mod.nsd, mesh)</b>](#load_fiber_direction_vtu) - Read fiber orientation from vtu
+             - [<b>fiber_loader::load(fName, kwrd, idx, simulation->com_mod.nsd, mesh)</b>](#fiber_loader) - Load cell or point fibers at quadrature points
            - [<b>vtk_xml::read_vtu_pdata(cTmp, "Stress", com_mod.nsd, com_mod.nsymd, 0, com_mod.msh\[iM\])</b>](#read_vtu_pdata) - Read prestress data 
            - [<b>load_var_ini(simulation, com_mod)</b>](#load_var_ini) - Set initial mesh pressure, velocity or displacement from a file 
            - <b>Read contact model parameters (not implmented, no tests)</b>
@@ -361,7 +361,7 @@ Read all mesh and BCs data. Replicates `SUBROUTINE READMSH` in `READMSH.f`
 - Re-arranging x and finding the size of the entire domain
 - Renumber face node IDs 
 - `read_fib_nff(simulation, com_mod.msh[iM], cTmp, "FIB_DIR", i)` - Read fiber orientation
-  - `vtk_xml_parser::load_fiber_direction_vtu(fName, kwrd, idx, simulation->com_mod.nsd, mesh)`
+  - `fiber_loader::load(fName, kwrd, idx, simulation->com_mod.nsd, mesh)`
 - Iterate over each `mesh` iM in `com_mod.msh` to set read prestress data
   - vtk_xml::read_vtu_pdata(cTmp, "Stress", com_mod.nsd, com_mod.nsymd, 0, com_mod.msh[iM]) - Read prestress data
 - If have prestress data then set com_mod.pS0() 
@@ -657,25 +657,28 @@ Compute the block ID for the given coordinate.
 <!-- read_fib_nff -->
 <!-- ============ -->
 
-<h2 id="read_fib_nff"> read_fib_nff(Simulation* simulation, mshType& mesh, const std::string& fName, const std::string& kwrd, const int idx) </h2>
+<h2 id="read_fib_nff"> bool read_fib_nff(Simulation* simulation, mshType& mesh, const std::string& fName, const std::string& kwrd, const int idx) </h2>
 
 [read_msh.cpp](https://github.com/ktbolt/svFSI/blob/Implement-svFSI-using-cpp_19/Code/Source/svFSI_cinterface/read_msh.cpp)
 
 Read fiber direction from a vtu file. 
 
-- `vtk_xml_parser::load_fiber_direction_vtu(fName, kwrd, idx, simulation->com_mod.nsd, mesh)`
+- `fiber_loader::load(fName, kwrd, idx, simulation->com_mod.nsd, mesh)`
 
 
-<!-- ======================== -->
-<!-- load_fiber_direction_vtu -->
-<!-- ======================== -->
+<!-- ============ -->
+<!-- fiber_loader -->
+<!-- ============ -->
 
-<h2 id="load_fiber_direction_vtu"> load_fiber_direction_vtu(const std::string& file_name, const std::string& data_name, const int idx,
-    const int nsd, mshType& mesh" </h2>
+<h2 id="fiber_loader"> fiber_loader::load(const std::string& file_name, const std::string& data_name, int idx,
+    int nsd, mshType& mesh) </h2>
 
-[vtk_xml_parser.cpp](https://github.com/ktbolt/svFSI/blob/Implement-svFSI-using-cpp_19/Code/Source/svFSI_cinterface/vtk_xml_parser.cpp)
+[fiber_loader.cpp](fiber_loader.cpp)
 
-Read fiber direction data from a VTK VTU file and copy it into a mesh. 
+Read fiber directions from VTK cell or point data. Cell data is copied to every
+quadrature point; point data is interpolated with the element shape functions.
+Interpolated fiber bases are normalized and reorthogonalized while preserving
+the primary fiber direction.
 
 
 <!-- ============== -->

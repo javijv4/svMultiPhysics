@@ -305,6 +305,17 @@ void construct_dsolid(ComMod& com_mod, CepMod& cep_mod, const mshType& lM, const
       N = lM.N.col(g);
       pSl = 0.0;
 
+      // Fiber files are loaded into a topology-independent quadrature-point
+      // representation. Keep the element-level fallback for fibers specified
+      // directly in the input and for legacy meshes.
+      if (lM.fN_q.size() != 0) {
+        for (int iFn = 0; iFn < nFn; iFn++) {
+          for (int i = 0; i < nsd; i++) {
+            fN(i,iFn) = lM.fN_q(i + nsd*iFn, g, e);
+          }
+        }
+      }
+
       if (nsd == 3) {
         struct_3d(com_mod, cep_mod, eNoN, nFn, w, N, Nx, al, yl, dl, bfl, fN,
                   pS0l, pSl, ya_l_f, ya_l_s, ya_l_n, lR, lK);
@@ -828,4 +839,3 @@ void struct_3d(ComMod &com_mod, CepMod &cep_mod, const int eNoN, const int nFn,
   }
 }
 };
-
