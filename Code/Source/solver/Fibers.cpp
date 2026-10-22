@@ -146,7 +146,6 @@ Vector<double> interpolate_dyadic(
 void Fibers::distribute(ComMod& com_mod, const CmMod& cm_mod, const cmType& cm,
     mshType& mesh)
 {
-  const int nG = mesh.nG;
   const int num_proc = cm.np();
   const int nEl = mesh.nEl;
   int location = static_cast<int>(data_location);
@@ -160,7 +159,7 @@ void Fibers::distribute(ComMod& com_mod, const CmMod& cm_mod, const cmType& cm,
   int num_components = 0;
   if (cm.mas(cm_mod)) {
     num_components = data_location == DataLocation::point
-      ? quadrature_fibers.nrows()
+      ? element_nodal_fibers.nrows()
       : input_fibers.nrows();
   }
   cm.bcast(cm_mod, &num_components);
@@ -202,28 +201,15 @@ void Fibers::distribute(ComMod& com_mod, const CmMod& cm_mod, const cmType& cm,
       "Fiber input data has no cell, point, or constant direction association.");
   }
 
-  Array3<double> reordered;
   Array3<double> reordered_nodal;
   if (cm.mas(cm_mod)) {
-    reordered.resize(num_components, nG, mesh.gnEl);
     reordered_nodal.resize(num_components, mesh.eNoN, mesh.gnEl);
     for (int e = 0; e < mesh.gnEl; ++e) {
-      reordered.set_slice(mesh.otnIEN[e], quadrature_fibers.slice(e));
       reordered_nodal.set_slice(
         mesh.otnIEN[e], element_nodal_fibers.slice(e));
     }
-    quadrature_fibers.clear();
     element_nodal_fibers.clear();
   }
-
-  quadrature_fibers.resize(num_components, nG, nEl);
-  for (int i = 0; i < num_proc; ++i) {
-    disp[i] = mesh.eDist[i] * nG * num_components;
-    scount[i] = (mesh.eDist[i + 1] - mesh.eDist[i]) * nG * num_components;
-  }
-  MPI_Scatterv(reordered.data(), scount.data(), disp.data(), cm_mod::mpreal,
-      quadrature_fibers.data(), nEl * nG * num_components,
-      cm_mod::mpreal, cm_mod.master, cm.com());
 
   element_nodal_fibers.resize(num_components, mesh.eNoN, nEl);
   for (int i = 0; i < num_proc; ++i) {
@@ -235,6 +221,9 @@ void Fibers::distribute(ComMod& com_mod, const CmMod& cm_mod, const cmType& cm,
       cm_mod::mpreal, element_nodal_fibers.data(),
       nEl * mesh.eNoN * num_components, cm_mod::mpreal,
       cm_mod.master, cm.com());
+
+  // Each rank already has the local mesh shape functions after partition.
+  shape_functions_ = mesh.N;
 }
 
 
@@ -311,8 +300,9 @@ Array<double> Fibers::gather_fibers(
 void Fibers::clear()
 {
   input_fibers.clear();
-  quadrature_fibers.clear();
   element_nodal_fibers.clear();
+  shape_functions_.clear();
+  quadrature_scratch_.clear();
   nfibers = 0;
   data_location = DataLocation::none;
 }
@@ -364,7 +354,7 @@ void Fibers::read(const MeshParameters& mesh_parameters, mshType& mesh, const in
   complete_fiber_basis(input_fibers, nsd);
 
   if (data_location == DataLocation::point) {
-    populate_quadrature_fibers(mesh, nsd);
+    populate_element_nodal_fibers(mesh, nsd);
   } else if (data_location != DataLocation::cell &&
              data_location != DataLocation::constant) {
     svmp::raise<svmp::InternalErrorException>(
@@ -554,6 +544,29 @@ Array<double> Fibers::get_quadrature_fibers(
       "The spatial dimension must be positive when accessing fiber directions.");
   }
 
+  if (data_location == DataLocation::point) {
+    if (g < 0 || g >= shape_functions_.ncols() ||
+        e < 0 || e >= element_nodal_fibers.nslices()) {
+      svmp::raise<svmp::IndexOutOfRangeException>(
+        "The requested quadrature fiber indices (" + std::to_string(g) +
+        ", " + std::to_string(e) + ") are out of bounds.");
+    }
+    const auto interpolated =
+      get_quadrature_fibers(nsd, shape_functions_.col(g), e);
+    if (quadrature_scratch_.nrows() != nsd ||
+        quadrature_scratch_.ncols() != nsd) {
+      quadrature_scratch_.clear();
+      quadrature_scratch_.resize(nsd, nsd);
+    }
+    for (int direction = 0; direction < nsd; ++direction) {
+      for (int component = 0; component < nsd; ++component) {
+        quadrature_scratch_(component, direction) =
+          interpolated(component, direction);
+      }
+    }
+    return {nsd, nsd, quadrature_scratch_.data()};
+  }
+
   double* data = nullptr;
   int num_components = 0;
 
@@ -568,17 +581,6 @@ Array<double> Fibers::get_quadrature_fibers(
     }
     num_components = input_fibers.nrows();
     data = input_fibers.data() + e * num_components;
-  } else if (data_location == DataLocation::point) {
-    if (g < 0 || g >= quadrature_fibers.ncols() ||
-        e < 0 || e >= quadrature_fibers.nslices()) {
-      svmp::raise<svmp::IndexOutOfRangeException>(
-        "The requested quadrature fiber indices (" + std::to_string(g) +
-        ", " + std::to_string(e) + ") are out of bounds.");
-    }
-    num_components = quadrature_fibers.nrows();
-    const auto offset =
-      (e * quadrature_fibers.ncols() + g) * num_components;
-    data = quadrature_fibers.data() + offset;
   } else {
     svmp::raise<svmp::InternalErrorException>(
       "Fiber input data has not been initialized.");
@@ -654,25 +656,18 @@ Fibers::get_eigen_fibers(const int nsd, const int g, const int e) const
 }
 
 
-void Fibers::populate_quadrature_fibers(const mshType& mesh, const int nsd)
+void Fibers::populate_element_nodal_fibers(const mshType& mesh, const int nsd)
 {
   if (mesh.nG <= 0) {
     svmp::raise<svmp::InternalErrorException>(
       "Point fiber directions cannot be populated before mesh quadrature points are initialized.");
   }
-  quadrature_fibers.resize(nsd * nsd, mesh.nG, mesh.gnEl);
-  quadrature_fibers = 0.0;
-  interpolate_point_fibers_mesh(mesh, nsd);
-}
-
-
-void Fibers::interpolate_point_fibers_mesh(
-  const mshType& mesh, const int nsd)
-{
   if (mesh.N.nrows() != mesh.eNoN || mesh.N.ncols() != mesh.nG) {
     svmp::raise<svmp::InternalErrorException>(
       "Mesh shape functions are inconsistent with its nodes and quadrature points.");
   }
+
+  shape_functions_ = mesh.N;
 
   element_nodal_fibers.resize(nsd * nsd, mesh.eNoN, mesh.gnEl);
   element_nodal_fibers = 0.0;
@@ -683,20 +678,6 @@ void Fibers::interpolate_point_fibers_mesh(
         for (int component = 0; component < nsd; ++component) {
           element_nodal_fibers(component + direction * nsd, a, e) =
             input_fibers(component + direction * nsd, node);
-        }
-      }
-    }
-  }
-
-  for (int g = 0; g < mesh.nG; ++g) {
-    const auto basis_functions = mesh.N.col(g);
-    for (int e = 0; e < mesh.gnEl; ++e) {
-      const auto fibers =
-        get_quadrature_fibers(nsd, basis_functions, e);
-      for (int direction = 0; direction < nsd; ++direction) {
-        for (int component = 0; component < nsd; ++component) {
-          quadrature_fibers(component + direction * nsd, g, e) =
-            fibers(component, direction);
         }
       }
     }

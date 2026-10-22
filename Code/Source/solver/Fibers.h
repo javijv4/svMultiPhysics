@@ -61,9 +61,12 @@ class Fibers {
      * basis for a quadrature point and element.
      *
      * Columns are fiber, sheet/transverse, and (in 3D) sheet normal. Constant
-     * directions use the single stored basis, cell directions use the requested
-     * cell basis, and point directions use their interpolated quadrature-point
-     * basis. The view shares this object's storage and must not outlive it.
+     * directions use the single stored basis and cell directions use the
+     * requested cell basis. Point directions are interpolated on the fly from
+     * the element nodal fibers and mesh shape functions at quadrature index g;
+     * that view aliases an internal scratch buffer and is invalidated by the
+     * next point-fiber query. Constant and cell views share this object's
+     * persistent storage and must not outlive it.
      */
     Array<double> get_quadrature_fibers(int nsd, int g, int e) const;
 
@@ -73,7 +76,7 @@ class Fibers {
      *
      * Point-associated directions are interpolated for element e; cell and
      * constant directions do not depend on the basis-function values and return
-     * their stored basis.
+     * their stored basis. For point data the returned Array owns its storage.
      */
     Array<double> get_quadrature_fibers(int nsd,
       const Vector<double>& basis_functions, int e) const;
@@ -98,8 +101,9 @@ class Fibers {
      * @brief Returns a read-only Eigen view of the complete basis returned by
      * get_quadrature_fibers().
      *
-     * The Map aliases this object's storage (the same underlying data as the
-     * Array view from get_quadrature_fibers) and must not outlive it.
+     * The Map aliases this object's storage (persistent input data for
+     * constant/cell, or the point-fiber scratch buffer) and must not outlive
+     * it. For point data the view is invalidated by the next point-fiber query.
      */
     Eigen::Map<const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic>>
     get_eigen_fibers(int nsd, int g, int e) const;
@@ -116,13 +120,19 @@ class Fibers {
     /// point for point data.
     Array<double> input_fibers;
 
-    /// Fiber directions at the quadrature points.
-    Array3<double> quadrature_fibers;
-
     /// Point-associated input fibers gathered at each element's nodes. Keeping
-    /// this element-local representation allows interpolation with alternative
-    /// basis functions after the mesh has been partitioned.
+    /// this element-local representation allows on-the-fly interpolation with
+    /// the mesh shape functions or alternative basis functions after the mesh
+    /// has been partitioned.
     Array3<double> element_nodal_fibers;
+
+    /// Mesh shape functions (eNoN x nG), used to interpolate point fibers at
+    /// quadrature index g in get_quadrature_fibers(nsd, g, e).
+    Array<double> shape_functions_;
+
+    /// Scratch storage for the last on-the-fly point-fiber basis returned by
+    /// get_quadrature_fibers(nsd, g, e) / get_eigen_fibers.
+    mutable Array<double> quadrature_scratch_;
 
   private:
     DataLocation data_location = DataLocation::none;
@@ -149,22 +159,16 @@ class Fibers {
     void check_input_fibers_orthonormal(int nsd) const;
 
     /**
-     * @brief Interpolates point fibers to quadrature points and orthonormalizes
-     * them.
+     * @brief Builds the element-nodal point-fiber representation and stores the
+     * mesh shape functions used for later on-the-fly interpolation.
      */
-    void populate_quadrature_fibers(const mshType& mesh, int nsd);
+    void populate_element_nodal_fibers(const mshType& mesh, int nsd);
 
     /**
      * @brief Completes already-orthonormal input fibers to an nsd-dimensional
      * basis via cross product (3D) or 90-degree rotation (2D).
      */
     void complete_fiber_basis(Array<double>& fibers, int nsd);
-
-    /**
-     * @brief Interpolates nodal fiber directions onto the mesh quadrature
-     * points.
-     */
-    void interpolate_point_fibers_mesh(const mshType& mesh, int nsd);
 
 };
 
